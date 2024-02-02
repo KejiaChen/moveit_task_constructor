@@ -74,7 +74,7 @@ Task createTask() {
 		auto stage = std::make_unique<stages::MoveRelative>("x +0.2", cartesian_interpolation);
 		stage->setGroup(group);
 		geometry_msgs::Vector3Stamped direction;
-		direction.header.frame_id = "world";
+		direction.header.frame_id = "panda_link0";
 		direction.vector.x = 0.2;
 		stage->setDirection(direction);
 		t.add(std::move(stage));
@@ -84,7 +84,7 @@ Task createTask() {
 		auto stage = std::make_unique<stages::MoveRelative>("y -0.3", cartesian_interpolation);
 		stage->setGroup(group);
 		geometry_msgs::Vector3Stamped direction;
-		direction.header.frame_id = "world";
+		direction.header.frame_id = "panda_link0";
 		direction.vector.y = -0.3;
 		stage->setDirection(direction);
 		t.add(std::move(stage));
@@ -94,7 +94,7 @@ Task createTask() {
 		auto stage = std::make_unique<stages::MoveRelative>("rz +45°", cartesian_interpolation);
 		stage->setGroup(group);
 		geometry_msgs::TwistStamped twist;
-		twist.header.frame_id = "world";
+		twist.header.frame_id = "panda_link0";
 		twist.twist.angular.z = M_PI / 4.;
 		stage->setDirection(twist);
 		t.add(std::move(stage));

@@ -179,6 +179,7 @@ void GenerateGraspPose::compute() {
 		// add frame at target pose
 		rviz_marker_tools::appendFrame(trajectory.markers(), target_pose_msg, 0.1, "grasp frame");
 
+		ROS_WARN_STREAM("GenerateGraspPose: spawn" << current_angle);
 		spawn(std::move(state), std::move(trajectory));
 	}
 }

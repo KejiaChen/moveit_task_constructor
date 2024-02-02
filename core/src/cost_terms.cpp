@@ -63,6 +63,7 @@ double CostTerm::operator()(const WrappedSolution& s, std::string& /*comment*/) 
 }
 
 double TrajectoryCostTerm::operator()(const SolutionSequence& s, std::string& comment) const {
+	ROS_WARN_STREAM("CostTerm: TrajectoryCostTerm");
 	double cost{ 0.0 };
 	std::string subcomment;
 	for (auto& solution : s.solutions()) {
@@ -89,6 +90,8 @@ LambdaCostTerm::LambdaCostTerm(const SubTrajectoryShortSignature& term)
   : term_{ [term](const SolutionBase& s, std::string& /*c*/) { return term(static_cast<const SubTrajectory&>(s)); } } {}
 
 double LambdaCostTerm::operator()(const SubTrajectory& s, std::string& comment) const {
+	ROS_WARN_STREAM("CostTerm: LambdaCostTerm");
+
 	assert(bool{ term_ });
 	return term_(s, comment);
 }
@@ -113,6 +116,8 @@ PathLength::PathLength(std::vector<std::string> joints) {
 }
 
 double PathLength::operator()(const SubTrajectory& s, std::string& /*comment*/) const {
+	ROS_WARN_STREAM("CostTerm: PathLength");
+	
 	const auto& traj = s.trajectory();
 
 	if (traj == nullptr || traj->getWayPointCount() == 0)
@@ -158,6 +163,8 @@ DistanceToReference::DistanceToReference(const std::map<std::string, double>& re
 }
 
 double DistanceToReference::operator()(const SubTrajectory& s, std::string& /*comment*/) const {
+	ROS_WARN_STREAM("CostTerm: DistanceToReference");
+
 	const auto& state = (mode == Mode::END_INTERFACE) ? s.end() : s.start();
 	const auto& traj = s.trajectory();
 
@@ -194,12 +201,14 @@ double DistanceToReference::operator()(const SubTrajectory& s, std::string& /*co
 }
 
 double TrajectoryDuration::operator()(const SubTrajectory& s, std::string& /*comment*/) const {
+	ROS_WARN_STREAM("CostTerm: TrajectoryDuration");
 	return s.trajectory() ? s.trajectory()->getDuration() : 0.0;
 }
 
 LinkMotion::LinkMotion(std::string link) : link_name{ std::move(link) } {}
 
 double LinkMotion::operator()(const SubTrajectory& s, std::string& comment) const {
+	ROS_WARN_STREAM("CostTerm: LinkMotion");
 	const auto& traj{ s.trajectory() };
 
 	if (traj == nullptr || traj->getWayPointCount() == 0)
@@ -230,6 +239,7 @@ Clearance::Clearance(bool with_world, bool cumulative, std::string group_propert
   , distance_to_cost{ [](double d) { return 1.0 / (d + 1e-5); } } {}
 
 double Clearance::operator()(const SubTrajectory& s, std::string& comment) const {
+	ROS_WARN_STREAM("CostTerm: Clearance");
 	static const std::string PREFIX{ "Clearance: " };
 
 	collision_detection::DistanceRequest request;

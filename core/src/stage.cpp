@@ -239,6 +239,8 @@ void StagePrivate::spawn(InterfaceState&& state, const SolutionBasePtr& solution
 	}
 
 	newSolution(solution);
+
+	// solution.cost();
 }
 
 void StagePrivate::connect(const InterfaceState& from, const InterfaceState& to, const SolutionBasePtr& solution) {
