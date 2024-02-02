@@ -193,6 +193,10 @@ void SolutionBase::setCost(double cost) {
 	cost_ = cost;
 }
 
+double SolutionBase::getCost() const{
+	return cost_;
+}
+
 void SolutionBase::markAsFailure(const std::string& msg) {
 	setCost(std::numeric_limits<double>::infinity());
 	if (!msg.empty()) {
