@@ -45,9 +45,16 @@ demo(modular)
 demo(alternative_path_costs)
 demo(ik_clearance_cost)
 demo(fallbacks_move_to)
-
+demo(pick)
+demo(dual_pick)
 demo(pick_place_demo)
 target_link_libraries(${PROJECT_NAME}_pick_place_demo ${PROJECT_NAME}_pick_place_task)
+
+catkin_install_python(PROGRAMS
+  scripts/cartesian.py
+  scripts/compute_ik.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
 
 install(DIRECTORY launch config
 	DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
