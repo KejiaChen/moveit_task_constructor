@@ -173,13 +173,16 @@ Task createTaskRaw() {
 	// t.setProperty("hand", follow_hand_group); 
 	// t.setProperty("ik_frame", "panda_1_link8"); 
 	
-	// transfomr from flange to gripper
+	// transform from flange to gripper
     std::vector<double> grasp_frame_transform_vector = {0, 0, 0.1, 1.571, 0.785, 1.571};
     Eigen::Isometry3d grasp_frame_transform; 
     convertToEigen(grasp_frame_transform_vector, grasp_frame_transform);
 
 	Stage* move_stage_ptr = nullptr;
-	// leader move to object head
+	{	
+		auto grasp = std::make_unique<SerialContainer>("pick object");
+		/* Move leder to object*/
+		{
 		auto move_to_object = std::make_unique<stages::MoveTo>("move to object", lead_pipeline);
 		move_to_object->setGroup(lead_arm_group);
 		geometry_msgs::PoseStamped lead_goal_pose;
@@ -194,18 +197,24 @@ Task createTaskRaw() {
     	ik_frame_2.translation().z() = 0.1034;
 		move_to_object->setIKFrame(ik_frame_2, "panda_2_hand");
 
-		move_stage_ptr = move_to_object.get();  // remember for monitoring pick pose generator
+		move_stage_ptr = move_to_object.get();  // remember for monitoring follower pose generator
 
-		t.add(std::move(move_to_object));
+		grasp->insert(std::move(move_to_object));
+		// t.add(std::move(move_to_object));
+		}
 
-	// connect to pick
+		/* Connect to next stage */
+		{
 		stages::Connect::GroupPlannerVector planners = {{follow_arm_group, follow_pipeline}, {lead_arm_group, lead_pipeline}, {follow_hand_group, follow_pipeline}, {lead_hand_group, lead_pipeline}};
 		auto connect = std::make_unique<stages::Connect>("connect", planners);
 		connect->properties().configureInitFrom(Stage::PARENT);
-		t.add(std::move(connect));
+
+		grasp->insert(std::move(connect));
+		// t.add(std::move(connect));
+		}
 	
-	
-		// grasp generator for follower
+		/* grasp generator for follower */
+		{
 		auto grasp_generator = std::make_unique<stages::GenerateGraspPoseFollow>("generate grasp pose");
 		grasp_generator->properties().set("group", follow_arm_group);
 		grasp_generator->setEndEffector(follow_hand_group);
@@ -242,11 +251,30 @@ Task createTaskRaw() {
 		ik_frame.translation().z() = 0.1034;
 		// // TODO: should it be "panda_hand" or "panda_link8"?
 		ik_wrapper->setIKFrame(ik_frame, "panda_1_hand");
+		
+		grasp->insert(std::move(ik_wrapper));
+		// t.add(std::move(ik_wrapper));
+		}
 
-		t.add(std::move(ik_wrapper));
+		t.add(std::move(grasp));
+	}
 	
-
 	return t;
+}
+
+// Subscriber callback function
+void receiveGoals(const std_msgs::String::ConstPtr& msg) {
+    // Log the received message
+    ROS_INFO("Received goal pose: %s", msg->data.c_str());
+
+	auto task = createTaskRaw();
+	try {
+		if (task.plan())
+            
+			task.introspection().publishSolution(*task.solutions().front());
+	} catch (const InitStageException& ex) {
+		std::cerr << "planning failed with exception" << std::endl << ex << task;
+	}
 }
 
 
@@ -263,7 +291,9 @@ int main(int argc, char** argv) {
 	moveit::planning_interface::PlanningSceneInterface psi;
 	spawnObject(psi, createCubeObject(marker_pub));
 
-	
+	// listening on goal positions
+	ros::Subscriber sub = nh.subscribe("/mtc_task_planner", 10, receiveGoals);
+
 
 	auto task = createTaskRaw();
 	try {
