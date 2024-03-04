@@ -184,7 +184,7 @@ void setupDemoScene() {
 	spawnObject(psi, createObject());
 }
 
-Task createTaskRaw() {
+Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goal_pose_vector, std::vector<double>& follower_goal_pose_vector) {
     std::string dual_arm_group = "dual_arm";
     std::string follow_arm_group = "panda_1";
     std::string lead_arm_group = "panda_2";
@@ -248,6 +248,7 @@ Task createTaskRaw() {
 		stages::Connect::GroupPlannerVector planners = {{follow_arm_group, follow_pipeline}, {lead_arm_group, lead_pipeline}, {follow_hand_group, follow_pipeline}, {lead_hand_group, lead_pipeline}};
 		auto connect = std::make_unique<stages::Connect>("connect", planners);
 		connect->properties().configureInitFrom(Stage::PARENT);
+		connect->properties().set("max_distance", 1e-3); // max allowable distance between end and goal position
 		
 		grasp->insert(std::move(connect));
 		// t.add(std::move(connect));
@@ -265,9 +266,12 @@ Task createTaskRaw() {
 		grasp_generator->setAngleDelta(.2); // enumerate over angles from 0 to 6.4 (less then 2 PI)
 		grasp_generator->setPreGraspPose("open");
 		grasp_generator->setGraspPose("close");
-		grasp_generator->setObject("object"); // object sets target pose frame
-		std::vector<double> grasp_target = {-0.05, 0.0, 0.0}; // target pose in object frame
-		grasp_generator->setTarget(grasp_target);
+		// grasp_generator->setObject("object"); // object sets target pose frame
+		grasp_generator->setObject(goal_frame_name); // object sets target pose frame
+
+		// std::vector<double> grasp_target = {-0.05, 0.0, 0.0}; // target pose in object frame
+		// grasp_generator->setTarget(grasp_target);
+		grasp_generator->setTarget(follower_goal_pose_vector);
 				// grasp_generator->setEndEffector("hand");
 		grasp_generator->setMonitoredStage(move_stage_ptr);
 
@@ -303,11 +307,20 @@ Task createTaskRaw() {
 }
 
 // Subscriber callback function
-void receiveGoals(const std_msgs::String::ConstPtr& msg) {
+void receiveGoals(const moveit_msgs::MTCPlanGoal::ConstPtr& msg) {
     // Log the received message
-	ROS_INFO("Received goal pose: %s", msg->data.c_str());
+	// ROS_INFO("Receive leader goal id: %d", msg->goal_id);
+    ROS_INFO("Receive leader goal position: [%.2f, %.2f, %.2f]",
+             msg->robot1_goal_pose.pose.position.x, msg->robot1_goal_pose.pose.position.y, msg->robot1_goal_pose.pose.position.z);
 
-	auto task = createTaskRaw();
+	std::string goal_frame_name = msg->robot1_goal_pose.header.frame_id;
+	std::vector<double> leader_goal_pose_vector = {msg->robot1_goal_pose.pose.position.x, msg->robot1_goal_pose.pose.position.y, msg->robot1_goal_pose.pose.position.z};
+	std::vector<double> follower_goal_pose_vector = {msg->robot2_goal_pose.pose.position.x, msg->robot2_goal_pose.pose.position.y, msg->robot2_goal_pose.pose.position.z};
+	auto task = createTaskRaw(goal_frame_name, leader_goal_pose_vector, follower_goal_pose_vector);
+
+	std_msgs::Bool success;
+	success.data = false;
+
 		try {
 		if (task.plan())
             
@@ -335,7 +348,10 @@ int main(int argc, char** argv) {
 	// ros::Subscriber sub = nh.subscribe("/mtc_task_planner", 10, receiveGoals);
 
 
-	auto task = createTaskRaw();
+	std::string goal_frame_name = "object";
+	std::vector<double> leader_goal_pose_vector = {0.05, 0, 0}; // {0.575, -0.081, 1.128}; //{0.552, 0.069, 1.128};
+	std::vector<double> follower_goal_pose_vector = {-0.05, 0, 0}; // {0.552, 0.069, 1.128}; //{0.575, -0.081, 1.128};
+	auto task = createTaskRaw(goal_frame_name, leader_goal_pose_vector, follower_goal_pose_vector);
 			try {
 				if (task.plan())
 					
