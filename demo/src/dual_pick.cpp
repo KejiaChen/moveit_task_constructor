@@ -13,12 +13,22 @@
 #include <moveit/task_constructor/stages/move_to.h>
 
 #include <ros/ros.h>
+#include <rosparam_shortcuts/rosparam_shortcuts.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 #include <gtest/gtest.h>
 #include <math.h>
 #include <tf2_eigen/tf2_eigen.h>
 
+#include <std_msgs/Bool.h>
+#include <std_msgs/String.h>
+#include <moveit_msgs/MTCPlanGoal.h>
+
 using namespace moveit::task_constructor;
+
+ros::Publisher pub;
+ros::Publisher marker_pub;
+std::string hand_open_pose_ = "open";
+std::string hand_close_pose_ = "close"; 
 
 void spawnObject(moveit::planning_interface::PlanningSceneInterface& psi, const moveit_msgs::CollisionObject& object) {
 	if (!psi.applyCollisionObject(object))
@@ -77,8 +87,34 @@ moveit_msgs::CollisionObject createObject() {
 	return object;
 }
 
+void appendFrameMarkers(ros::Publisher& marker_pub, geometry_msgs::PoseStamped& pose_stamped, std::string frame_name) {
+	// Append frame markers
+	std::deque<visualization_msgs::Marker> object_markers;
+	// geometry_msgs::PoseStamped pose_stamped;
+	// pose_stamped.pose = pose;
+    // pose_stamped.header.frame_id = "world";
+	rviz_marker_tools::appendFrame(object_markers, pose_stamped, 0.1, frame_name);
+
+	visualization_msgs::MarkerArray marker_array_msg;
+	int id = 0;
+    for (const auto& marker : object_markers) {
+    visualization_msgs::Marker mutable_marker = marker;  // Make a non-const copy
+    mutable_marker.id = id++;
+    marker_array_msg.markers.push_back(mutable_marker);
+	}
+
+	double timeout = 2.0;
+	ros::WallTime start = ros::WallTime::now();
+    ros::WallTime end = start;
+    while ((end - start).toSec() < timeout && ros::ok()) {
+        marker_pub.publish(marker_array_msg);
+        ros::WallDuration(1.0).sleep();
+        end = ros::WallTime::now();
+    }
+}
+
 moveit_msgs::CollisionObject createCubeObject(ros::Publisher& marker_pub) {
-	std::string object_name="object";
+	std::string object_name= "object";
     std::string object_reference_frame = "world";
 	std::vector<double> object_dimensions = {0.1, 0.05, 0.03};
 	std::vector<double> object_position_vector = {0.50702, -0.2, 1.285};
@@ -108,30 +144,34 @@ moveit_msgs::CollisionObject createCubeObject(ros::Publisher& marker_pub) {
 	// pose.position.z += 0.5 * object_dimensions[0];
 	object.primitive_poses.push_back(pose);
 
-	// Append frame markers
-	std::deque<visualization_msgs::Marker> object_markers;
-    geometry_msgs::PoseStamped pose_stamped;
-	pose_stamped.pose = pose;
-	// pose_stamped.pose = tf2::toMsg(object_pose);
+	// // Append frame markers
+	// std::deque<visualization_msgs::Marker> object_markers;
+
+	    geometry_msgs::PoseStamped pose_stamped;
+		pose_stamped.pose = pose;
+	// // pose_stamped.pose = tf2::toMsg(object_pose);
     pose_stamped.header.frame_id = "world";
-	rviz_marker_tools::appendFrame(object_markers, pose_stamped, 0.1, "object frame");
+	// rviz_marker_tools::appendFrame(object_markers, pose_stamped, 0.1, "object frame");
 
-	visualization_msgs::MarkerArray marker_array_msg;
-	int id = 0;
-    for (const auto& marker : object_markers) {
-    visualization_msgs::Marker mutable_marker = marker;  // Make a non-const copy
-    mutable_marker.id = id++;
-    marker_array_msg.markers.push_back(mutable_marker);
-	}
+	// visualization_msgs::MarkerArray marker_array_msg;
+	// int id = 0;
+    // for (const auto& marker : object_markers) {
+    // visualization_msgs::Marker mutable_marker = marker;  // Make a non-const copy
+    // mutable_marker.id = id++;
+    // marker_array_msg.markers.push_back(mutable_marker);
+	// }
 
-	double timeout = 2.0;
-	ros::WallTime start = ros::WallTime::now();
-    ros::WallTime end = start;
-    while ((end - start).toSec() < timeout && ros::ok()) {
-        marker_pub.publish(marker_array_msg);
-        ros::WallDuration(1.0).sleep();
-        end = ros::WallTime::now();
-    }
+	// double timeout = 2.0;
+	// ros::WallTime start = ros::WallTime::now();
+    // ros::WallTime end = start;
+    // while ((end - start).toSec() < timeout && ros::ok()) {
+    //     marker_pub.publish(marker_array_msg);
+    //     ros::WallDuration(1.0).sleep();
+    //     end = ros::WallTime::now();
+    // }
+
+	appendFrameMarkers(marker_pub, pose_stamped, "object frame");
+
 	return object;
 }
 
@@ -192,7 +232,7 @@ Task createTaskRaw() {
 		lead_goal_pose.pose.orientation.w = 1.0;
 		// pose_stamped.pose = tf2::toMsg(object_pose);
 		lead_goal_pose.header.frame_id = "object";
-		move_to_object->setGoal(lead_goal_pose);
+				move_to_object->setGoal(lead_goal_pose);
 		Eigen::Isometry3d ik_frame_2 = Eigen::Isometry3d::Identity();
     	ik_frame_2.translation().z() = 0.1034;
 		move_to_object->setIKFrame(ik_frame_2, "panda_2_hand");
@@ -208,7 +248,7 @@ Task createTaskRaw() {
 		stages::Connect::GroupPlannerVector planners = {{follow_arm_group, follow_pipeline}, {lead_arm_group, lead_pipeline}, {follow_hand_group, follow_pipeline}, {lead_hand_group, lead_pipeline}};
 		auto connect = std::make_unique<stages::Connect>("connect", planners);
 		connect->properties().configureInitFrom(Stage::PARENT);
-
+		
 		grasp->insert(std::move(connect));
 		// t.add(std::move(connect));
 		}
@@ -228,7 +268,7 @@ Task createTaskRaw() {
 		grasp_generator->setObject("object"); // object sets target pose frame
 		std::vector<double> grasp_target = {-0.05, 0.0, 0.0}; // target pose in object frame
 		grasp_generator->setTarget(grasp_target);
-		// grasp_generator->setEndEffector("hand");
+				// grasp_generator->setEndEffector("hand");
 		grasp_generator->setMonitoredStage(move_stage_ptr);
 
 		auto ik_wrapper = std::make_unique<stages::ComputeIK>("grasp pose IK", std::move(grasp_generator));
@@ -265,14 +305,14 @@ Task createTaskRaw() {
 // Subscriber callback function
 void receiveGoals(const std_msgs::String::ConstPtr& msg) {
     // Log the received message
-    ROS_INFO("Received goal pose: %s", msg->data.c_str());
+	ROS_INFO("Received goal pose: %s", msg->data.c_str());
 
 	auto task = createTaskRaw();
-	try {
+		try {
 		if (task.plan())
             
 			task.introspection().publishSolution(*task.solutions().front());
-	} catch (const InitStageException& ex) {
+				} catch (const InitStageException& ex) {
 		std::cerr << "planning failed with exception" << std::endl << ex << task;
 	}
 }
@@ -281,7 +321,7 @@ void receiveGoals(const std_msgs::String::ConstPtr& msg) {
 int main(int argc, char** argv) {
 	ros::init(argc, argv, "mtc_tutorial");
 	ros::NodeHandle nh;
-	ros::Publisher marker_pub = nh.advertise<visualization_msgs::MarkerArray>("interactive_robot_marray", 10);
+		ros::Publisher marker_pub = nh.advertise<visualization_msgs::MarkerArray>("interactive_robot_marray", 10);
 	// run an asynchronous spinner to communicate with the move_group node and rviz
 	ros::AsyncSpinner spinner(1);
 	spinner.start();
@@ -290,35 +330,35 @@ int main(int argc, char** argv) {
     ros::Duration(1.0).sleep();  // Wait for ApplyPlanningScene service
 	moveit::planning_interface::PlanningSceneInterface psi;
 	spawnObject(psi, createCubeObject(marker_pub));
-
+	
 	// listening on goal positions
-	ros::Subscriber sub = nh.subscribe("/mtc_task_planner", 10, receiveGoals);
+	// ros::Subscriber sub = nh.subscribe("/mtc_task_planner", 10, receiveGoals);
 
 
 	auto task = createTaskRaw();
-	try {
-		if (task.plan())
-            
+			try {
+				if (task.plan())
+					
 			task.introspection().publishSolution(*task.solutions().front());
-	} catch (const InitStageException& ex) {
-		std::cerr << "planning failed with exception" << std::endl << ex << task;
-	}
-
+								} catch (const InitStageException& ex) {
+				std::cerr << "planning failed with exception" << std::endl << ex << task;
+			}
+		
     // task.printState();
 
     Stage* generateGraspPoseStage = task.stages()->findChild("pick/grasp/compute ik");
     
     if (generateGraspPoseStage) {
-        // Proceed with accessing solutions
-        // Iterate through solutions and retrieve costs
-        for (const auto& solution : generateGraspPoseStage->solutions()) {
-            double cost = solution->cost();
-            const std::string comment = solution->comment();
-            std::cout << "cost for angle " << comment << " is " << cost << std::endl;
-        }
+    // Proceed with accessing solutions
+    // Iterate through solutions and retrieve costs
+    for (const auto& solution : generateGraspPoseStage->solutions()) {
+    double cost = solution->cost();
+    const std::string comment = solution->comment();
+    std::cout << "cost for angle " << comment << " is " << cost << std::endl;
+    }
     } else {
-        // Handle the case where the stage is not found
-        std::cerr << "Error: 'generate grasp pose' stage not found." << std::endl;
+    // Handle the case where the stage is not found
+    std::cerr << "Error: 'generate grasp pose' stage not found." << std::endl;
     }
 
 	ros::waitForShutdown();  // keep alive for interactive inspection in rviz
