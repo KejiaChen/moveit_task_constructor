@@ -206,6 +206,9 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 	auto follow_pipeline = std::make_shared<solvers::PipelinePlanner>();
 	follow_pipeline->setPlannerId("RRTConnectkConfigDefault");
 
+	auto dual_pipeline = std::make_shared<solvers::PipelinePlanner>();
+	dual_pipeline->setPlannerId("RRTConnectkConfigDefault");
+
     // // Set task properties
 	// // t.setProperty("group", dual_arm_group);
 	// t.setProperty("group", follow_arm_group);
@@ -226,12 +229,20 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 		auto move_to_object = std::make_unique<stages::MoveTo>("move to object", lead_pipeline);
 		move_to_object->setGroup(lead_arm_group);
 		geometry_msgs::PoseStamped lead_goal_pose;
-		lead_goal_pose.pose.position.x = 0.05;
-		lead_goal_pose.pose.position.y = 0.0;
-		lead_goal_pose.pose.position.z = 0.0;
-		lead_goal_pose.pose.orientation.w = 1.0;
+		lead_goal_pose.pose.position.x = leader_goal_pose_vector[0]; // 0.05
+		lead_goal_pose.pose.position.y = leader_goal_pose_vector[1]; // 0.0
+		lead_goal_pose.pose.position.z = leader_goal_pose_vector[2]; // 0.0
+		// orientation from clip frame to robot ee frame
+		lead_goal_pose.pose.orientation.x = 0.0;
+		lead_goal_pose.pose.orientation.y = 0.9999997;
+		lead_goal_pose.pose.orientation.z = 0.0;
+		lead_goal_pose.pose.orientation.w = 0.0007963;
 		// pose_stamped.pose = tf2::toMsg(object_pose);
-		lead_goal_pose.header.frame_id = "object";
+		// lead_goal_pose.header.frame_id = "object";
+		lead_goal_pose.header.frame_id = goal_frame_name;
+
+		appendFrameMarkers(marker_pub, lead_goal_pose, "leader_goal_frame");
+
 				move_to_object->setGoal(lead_goal_pose);
 		Eigen::Isometry3d ik_frame_2 = Eigen::Isometry3d::Identity();
     	ik_frame_2.translation().z() = 0.1034;
@@ -243,9 +254,12 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 		// t.add(std::move(move_to_object));
 		}
 
-		/* Connect to next stage */
+		/****************************************************
+  ---- *               Connect to next stage                 *
+		***************************************************/
 		{
-		stages::Connect::GroupPlannerVector planners = {{follow_arm_group, follow_pipeline}, {lead_arm_group, lead_pipeline}, {follow_hand_group, follow_pipeline}, {lead_hand_group, lead_pipeline}};
+		stages::Connect::GroupPlannerVector planners = {{follow_arm_group, follow_pipeline}, {lead_arm_group, lead_pipeline}};
+		// {follow_hand_group, follow_pipeline}, {lead_hand_group, lead_pipeline}
 		auto connect = std::make_unique<stages::Connect>("connect", planners);
 		connect->properties().configureInitFrom(Stage::PARENT);
 		connect->properties().set("max_distance", 1e-3); // max allowable distance between end and goal position
@@ -254,7 +268,9 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 		// t.add(std::move(connect));
 		}
 	
-		/* grasp generator for follower */
+		/****************************************************
+  ---- *            Grasp POSE generator for follower     *
+		***************************************************/
 		{
 		auto grasp_generator = std::make_unique<stages::GenerateGraspPoseFollow>("generate grasp pose");
 		grasp_generator->properties().set("group", follow_arm_group);
@@ -323,7 +339,7 @@ void receiveGoals(const moveit_msgs::MTCPlanGoal::ConstPtr& msg) {
 
 		try {
 		if (task.plan())
-            
+            ROS_INFO("planning succeeded");
 			task.introspection().publishSolution(*task.solutions().front());
 				} catch (const InitStageException& ex) {
 		std::cerr << "planning failed with exception" << std::endl << ex << task;
@@ -342,20 +358,37 @@ int main(int argc, char** argv) {
     // setupDemoScene();
     ros::Duration(1.0).sleep();  // Wait for ApplyPlanningScene service
 	moveit::planning_interface::PlanningSceneInterface psi;
-	spawnObject(psi, createCubeObject(marker_pub));
+	// spawnObject(psi, createCubeObject(marker_pub));
 	
 	// listening on goal positions
 	// ros::Subscriber sub = nh.subscribe("/mtc_task_planner", 10, receiveGoals);
 
 
-	std::string goal_frame_name = "object";
-	std::vector<double> leader_goal_pose_vector = {0.05, 0, 0}; // {0.575, -0.081, 1.128}; //{0.552, 0.069, 1.128};
-	std::vector<double> follower_goal_pose_vector = {-0.05, 0, 0}; // {0.552, 0.069, 1.128}; //{0.575, -0.081, 1.128};
+	std::string goal_frame_name = "clip7";
+	std::vector<double> leader_goal_pose_vector = {-0.05, 0, 0}; // {0.575, -0.081, 1.128}; //{0.552, 0.069, 1.128};
+	std::vector<double> follower_goal_pose_vector = {0.05, 0, 0}; // {0.552, 0.069, 1.128}; //{0.575, -0.081, 1.128};
 	auto task = createTaskRaw(goal_frame_name, leader_goal_pose_vector, follower_goal_pose_vector);
 			try {
 				if (task.plan())
-					
-			task.introspection().publishSolution(*task.solutions().front());
+					// ROS_WARN("planning for clip %s succeeded", clip_id.c_str());
+					task.introspection().publishSolution(*task.solutions().front());
+
+					ROS_WARN("Executing solution trajectory");
+					moveit_msgs::MoveItErrorCodes execute_result;
+
+					execute_result = task.execute(*task.solutions().front());
+					// // If you want to inspect the goal message, use this instead:
+					// actionlib::SimpleActionClient<moveit_task_constructor_msgs::ExecuteTaskSolutionAction>
+					// execute("execute_task_solution", true); execute.waitForServer();
+					// moveit_task_constructor_msgs::ExecuteTaskSolutionGoal execute_goal;
+					// task_->solutions().front()->toMsg(execute_goal.solution);
+					// execute.sendGoalAndWait(execute_goal);
+					// execute_result = execute.getResult()->error_code;
+
+					if (execute_result.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+						ROS_ERROR_STREAM("Task execution failed and returned: " << execute_result.val);
+					}
+
 								} catch (const InitStageException& ex) {
 				std::cerr << "planning failed with exception" << std::endl << ex << task;
 			}
