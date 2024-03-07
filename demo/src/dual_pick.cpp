@@ -224,7 +224,29 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 	Stage* move_stage_ptr = nullptr;
 	{	
 		auto grasp = std::make_unique<SerialContainer>("pick object");
-		/* Move leder to object*/
+		/****************************************************
+  ---- *               Close leader hand                     *
+		***************************************************/
+		{
+			auto stage = std::make_unique<stages::MoveTo>("close hand", lead_pipeline);
+			stage->setGroup(lead_hand_group);
+			stage->setGoal(hand_close_pose_);
+			grasp->insert(std::move(stage));
+		}
+
+		/****************************************************
+  ---- *               Open follower hand                     *
+		***************************************************/
+		{
+			auto stage = std::make_unique<stages::MoveTo>("open hand", follow_pipeline);
+			stage->setGroup(follow_hand_group);
+			stage->setGoal(hand_open_pose_);
+			grasp->insert(std::move(stage));
+		}
+
+		/****************************************************
+  ---- *               Move leder to object                  *
+		***************************************************/
 		{
 		auto move_to_object = std::make_unique<stages::MoveTo>("move to object", lead_pipeline);
 		move_to_object->setGroup(lead_arm_group);
@@ -316,6 +338,16 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 		// t.add(std::move(ik_wrapper));
 		}
 
+		/****************************************************
+  ---- *               Close follower hand                     *
+		 ***************************************************/
+		{
+			auto stage = std::make_unique<stages::MoveTo>("close hand", follow_pipeline);
+			stage->setGroup(follow_hand_group);
+			stage->setGoal(hand_close_pose_);
+			grasp->insert(std::move(stage));
+		}
+
 		t.add(std::move(grasp));
 	}
 	
@@ -348,6 +380,8 @@ void receiveGoals(const moveit_msgs::MTCPlanGoal::ConstPtr& msg) {
 
 
 int main(int argc, char** argv) {
+	Task task;
+
 	ros::init(argc, argv, "mtc_tutorial");
 	ros::NodeHandle nh;
 		ros::Publisher marker_pub = nh.advertise<visualization_msgs::MarkerArray>("interactive_robot_marray", 10);
@@ -360,14 +394,27 @@ int main(int argc, char** argv) {
 	moveit::planning_interface::PlanningSceneInterface psi;
 	// spawnObject(psi, createCubeObject(marker_pub));
 	
-	// listening on goal positions
-	// ros::Subscriber sub = nh.subscribe("/mtc_task_planner", 10, receiveGoals);
+	std::vector<std::string> clip_names = {"clip7", "clip6", "clip9"};
+	std::map<std::string, geometry_msgs::Pose> clip_poses = psi.getObjectPoses(clip_names);
 
+	for (const auto& clip_id : clip_names) {
+        const auto& it = clip_poses.find(clip_id); // Find pose for the clip name
+        if (it != clip_poses.end()) {
+            const geometry_msgs::Pose& pose = it->second;
 
-	std::string goal_frame_name = "clip7";
-	std::vector<double> leader_goal_pose_vector = {-0.05, 0, 0}; // {0.575, -0.081, 1.128}; //{0.552, 0.069, 1.128};
-	std::vector<double> follower_goal_pose_vector = {0.05, 0, 0}; // {0.552, 0.069, 1.128}; //{0.575, -0.081, 1.128};
-	auto task = createTaskRaw(goal_frame_name, leader_goal_pose_vector, follower_goal_pose_vector);
+			ROS_WARN("planning for clip %s started", clip_id.c_str());
+			
+			// append visual frames
+			geometry_msgs::PoseStamped clip_pose_stamped;
+			clip_pose_stamped.pose = pose;
+			clip_pose_stamped.header.frame_id = "world";
+			appendFrameMarkers(marker_pub, clip_pose_stamped, clip_id + "_frame");
+
+			// motion plan to the clip
+			std::string goal_frame_name = clip_id;
+			std::vector<double> leader_goal_pose_vector = {-0.05, 0, 0}; // {0.575, -0.081, 1.128}; //{0.552, 0.069, 1.128};
+			std::vector<double> follower_goal_pose_vector = {0.05, 0, 0}; // {0.552, 0.069, 1.128}; //{0.575, -0.081, 1.128};
+			task = createTaskRaw(goal_frame_name, leader_goal_pose_vector, follower_goal_pose_vector);
 			try {
 				if (task.plan())
 					// ROS_WARN("planning for clip %s succeeded", clip_id.c_str());
@@ -388,27 +435,28 @@ int main(int argc, char** argv) {
 					if (execute_result.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
 						ROS_ERROR_STREAM("Task execution failed and returned: " << execute_result.val);
 					}
-
-								} catch (const InitStageException& ex) {
-				std::cerr << "planning failed with exception" << std::endl << ex << task;
-			}
+				} catch (const InitStageException& ex) {
+					std::cerr << "planning failed with exception" << std::endl << ex << task;
+				}
+		}
+	}
 		
     // task.printState();
 
-    Stage* generateGraspPoseStage = task.stages()->findChild("pick/grasp/compute ik");
+    // Stage* generateGraspPoseStage = task.stages()->findChild("pick/grasp/compute ik");
     
-    if (generateGraspPoseStage) {
-    // Proceed with accessing solutions
-    // Iterate through solutions and retrieve costs
-    for (const auto& solution : generateGraspPoseStage->solutions()) {
-    double cost = solution->cost();
-    const std::string comment = solution->comment();
-    std::cout << "cost for angle " << comment << " is " << cost << std::endl;
-    }
-    } else {
-    // Handle the case where the stage is not found
-    std::cerr << "Error: 'generate grasp pose' stage not found." << std::endl;
-    }
+    // if (generateGraspPoseStage) {
+    // // Proceed with accessing solutions
+    // // Iterate through solutions and retrieve costs
+    // for (const auto& solution : generateGraspPoseStage->solutions()) {
+    // double cost = solution->cost();
+    // const std::string comment = solution->comment();
+    // std::cout << "cost for angle " << comment << " is " << cost << std::endl;
+    // }
+    // } else {
+    // // Handle the case where the stage is not found
+    // std::cerr << "Error: 'generate grasp pose' stage not found." << std::endl;
+    // }
 
 	ros::waitForShutdown();  // keep alive for interactive inspection in rviz
 	return 0;
