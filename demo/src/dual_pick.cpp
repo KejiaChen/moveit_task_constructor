@@ -394,7 +394,7 @@ int main(int argc, char** argv) {
 	moveit::planning_interface::PlanningSceneInterface psi;
 	// spawnObject(psi, createCubeObject(marker_pub));
 	
-	std::vector<std::string> clip_names = {"clip7", "clip6", "clip9"};
+	std::vector<std::string> clip_names = {"clip7"}; //, "clip6", "clip9"
 	std::map<std::string, geometry_msgs::Pose> clip_poses = psi.getObjectPoses(clip_names);
 
 	for (const auto& clip_id : clip_names) {
