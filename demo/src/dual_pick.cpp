@@ -13,6 +13,7 @@
 #include <moveit/task_constructor/stages/compute_ik_multiple.h>
 #include <moveit/task_constructor/stages/move_to.h>
 #include <moveit/task_constructor/stages/fixed_cartesian_poses.h>
+#include <moveit/task_constructor/stages/fixed_cartesian_poses_multiple.h>
 
 #include <ros/ros.h>
 #include <rosparam_shortcuts/rosparam_shortcuts.h>
@@ -28,6 +29,9 @@
 #include <moveit/task_constructor/cost_terms.h>
 
 using namespace moveit::task_constructor;
+using GroupPoseDict = std::map<std::string, geometry_msgs::PoseStamped>;
+using GroupPoseMatrixDict = std::map<std::string, Eigen::Isometry3d>;
+using GroupStringDict = std::map<std::string, std::string>;
 
 ros::Publisher pub;
 ros::Publisher marker_pub;
@@ -285,13 +289,6 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 		lead_goal_pose.header.frame_id = goal_frame_name;
 		appendFrameMarkers(marker_pub, lead_goal_pose, "leader_goal_frame");
 
-		auto lead_fixed_pose = std::make_unique<stages::FixedCartesianPoses>("lead_fixed_pose");
-		lead_fixed_pose->addPose(lead_goal_pose);
-		lead_fixed_pose->setMonitoredStage(pre_move_stage_ptr);
-
-		Eigen::Isometry3d ik_frame_1 = Eigen::Isometry3d::Identity();
-    	ik_frame_1.translation().z() = 0.1034;
-
 		geometry_msgs::PoseStamped follow_goal_pose;
 		follow_goal_pose.pose.position.x = follower_goal_pose_vector[0]; // 0.05
 		follow_goal_pose.pose.position.y = follower_goal_pose_vector[1]; // 0.0
@@ -306,28 +303,45 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 		follow_goal_pose.header.frame_id = goal_frame_name;
 		appendFrameMarkers(marker_pub, follow_goal_pose, "follower_goal_frame");
 
-		auto follow_fixed_pose = std::make_unique<stages::FixedCartesianPoses>("follow_fixed_pose");
-		follow_fixed_pose->addPose(follow_goal_pose);
-		follow_fixed_pose->setMonitoredStage(pre_move_stage_ptr);
+		// auto lead_fixed_pose = std::make_unique<stages::FixedCartesianPoses>("lead_fixed_pose");
+		// lead_fixed_pose->addPose(lead_goal_pose);
+		// lead_fixed_pose->setMonitoredStage(pre_move_stage_ptr);
+
+		Eigen::Isometry3d ik_frame_1 = Eigen::Isometry3d::Identity();
+    	ik_frame_1.translation().z() = 0.1034;
+
+		// auto follow_fixed_pose = std::make_unique<stages::FixedCartesianPoses>("follow_fixed_pose");
+		// follow_fixed_pose->addPose(follow_goal_pose);
+		// follow_fixed_pose->setMonitoredStage(pre_move_stage_ptr);
 
 		Eigen::Isometry3d ik_frame_2 = Eigen::Isometry3d::Identity();
     	ik_frame_2.translation().z() = 0.1034;
 
-		auto ik_wrapper = std::make_unique<stages::ComputeIK>("move IK", std::move(lead_fixed_pose));
-		ik_wrapper->setGroup(lead_arm_group);
-		ik_wrapper->setEndEffector(lead_hand_group);
+		auto dual_fixed_pose = std::make_unique<stages::FixedCartesianPosesMultiple>("dual_fixed_pose");
+		GroupPoseDict pose_pairs = {{follow_arm_group, follow_goal_pose}, {lead_arm_group, lead_goal_pose}};
+		dual_fixed_pose->addPosePair(pose_pairs);
+		dual_fixed_pose->setMonitoredStage(pre_move_stage_ptr);
+
+		std::vector<std::string> ik_groups = {follow_arm_group, lead_arm_group};
+		GroupStringDict ik_endeffectors = {{follow_arm_group, follow_hand_group}, {lead_arm_group, lead_hand_group}};
+		GroupStringDict ik_links = {{follow_arm_group, "panda_1_hand"}, {lead_arm_group, "panda_2_hand"}};
+		GroupPoseMatrixDict ik_frames = {{follow_arm_group, ik_frame_1}, {lead_arm_group, ik_frame_2}};
+
+		auto ik_wrapper = std::make_unique<stages::ComputeIKMultiple>("move IK", std::move(dual_fixed_pose), ik_groups, dual_arm_group);
+		ik_wrapper->setGroup(ik_groups);
+		ik_wrapper->setEndEffector(ik_endeffectors);
 		// ik_wrapper->properties().configureInitFrom(Stage::PARENT, { "eef", "group" });
-		ik_wrapper->properties().configureInitFrom(Stage::INTERFACE, {"target_pose" });
+		ik_wrapper->properties().configureInitFrom(Stage::INTERFACE, {"target_poses"});
 		// ik_wrapper->properties().set("object", "object");
-		ik_wrapper->setMaxIKSolutions(30);
+		ik_wrapper->setMaxIKSolutions(60);
 		ik_wrapper->setMinSolutionDistance(1.0);
 
-		ik_wrapper->setIKFrame(ik_frame_2, "panda_2_hand");
+		ik_wrapper->setIKFrame(ik_frames, ik_links);
 
-		auto cl_cost{ std::make_unique<cost::Clearance>() };
-		cl_cost->cumulative = true;  // sum up pairwise distances between the robot to all objects?
-		cl_cost->with_world = true;  // consider distance of the robot to world objects?
-		ik_wrapper->setCostTerm(std::move(cl_cost));
+		// auto cl_cost{ std::make_unique<cost::Clearance>() };
+		// cl_cost->cumulative = true;  // sum up pairwise distances between the robot to all objects?
+		// cl_cost->with_world = true;  // consider distance of the robot to world objects?
+		// ik_wrapper->setCostTerm(std::move(cl_cost));
 			
 		grasp->insert(std::move(ik_wrapper));
 
@@ -339,56 +353,56 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 		***************************************************/
 		// {
 		
-// 		geometry_msgs::PoseStamped lead_goal_pose;
-// 		lead_goal_pose.pose.position.x = leader_goal_pose_vector[0]; // 0.05
-// 		lead_goal_pose.pose.position.y = leader_goal_pose_vector[1]; // 0.0
-// 		lead_goal_pose.pose.position.z = leader_goal_pose_vector[2]; // 0.0
-// 		// orientation from clip frame to robot ee frame
-// 		lead_goal_pose.pose.orientation.x = 0.0;
-// 		lead_goal_pose.pose.orientation.y = 0.9999997;
-// 		lead_goal_pose.pose.orientation.z = 0.0;
-// 		lead_goal_pose.pose.orientation.w = 0.0007963;
-// 		// pose_stamped.pose = tf2::toMsg(object_pose);
-// 		// lead_goal_pose.header.frame_id = "object";
-// 		lead_goal_pose.header.frame_id = goal_frame_name;
-// 		appendFrameMarkers(marker_pub, lead_goal_pose, "leader_goal_frame");
+		// geometry_msgs::PoseStamped lead_goal_pose;
+		// lead_goal_pose.pose.position.x = leader_goal_pose_vector[0]; // 0.05
+		// lead_goal_pose.pose.position.y = leader_goal_pose_vector[1]; // 0.0
+		// lead_goal_pose.pose.position.z = leader_goal_pose_vector[2]; // 0.0
+		// // orientation from clip frame to robot ee frame
+		// lead_goal_pose.pose.orientation.x = 0.0;
+		// lead_goal_pose.pose.orientation.y = 0.9999997;
+		// lead_goal_pose.pose.orientation.z = 0.0;
+		// lead_goal_pose.pose.orientation.w = 0.0007963;
+		// // pose_stamped.pose = tf2::toMsg(object_pose);
+		// // lead_goal_pose.header.frame_id = "object";
+		// lead_goal_pose.header.frame_id = goal_frame_name;
+		// appendFrameMarkers(marker_pub, lead_goal_pose, "leader_goal_frame");
 
-// 		Eigen::Isometry3d ik_frame_2 = Eigen::Isometry3d::Identity();
-//     	ik_frame_2.translation().z() = 0.1034;
+		// Eigen::Isometry3d ik_frame_2 = Eigen::Isometry3d::Identity();
+    	// ik_frame_2.translation().z() = 0.1034;
 
-// 		/*Option 1: move directly to object*/
-// 		// auto move_to_object = std::make_unique<stages::MoveTo>("move to object", lead_pipeline);
-// 		// move_to_object->setGroup(lead_arm_group);
-// 		// move_to_object->setGoal(lead_goal_pose);
-// 		// move_to_object->setIKFrame(ik_frame_2, "panda_2_hand");
-// 		// move_stage_ptr = move_to_object.get();  // remember for monitoring follower pose generator
-// 		// grasp->insert(std::move(move_to_object));
+		// /*Option 1: move directly to object*/
+		// // auto move_to_object = std::make_unique<stages::MoveTo>("move to object", lead_pipeline);
+		// // move_to_object->setGroup(lead_arm_group);
+		// // move_to_object->setGoal(lead_goal_pose);
+		// // move_to_object->setIKFrame(ik_frame_2, "panda_2_hand");
+		// // move_stage_ptr = move_to_object.get();  // remember for monitoring follower pose generator
+		// // grasp->insert(std::move(move_to_object));
 		
-// 		/*Option 2: force multiple IK solutions given a certain pose*/
-// 		auto lead_fixed_pose = std::make_unique<stages::FixedCartesianPoses>("lead_fixed_pose");
-// 		lead_fixed_pose->addPose(lead_goal_pose);
-// 		lead_fixed_pose->setMonitoredStage(pre_move_stage_ptr);
+		// /*Option 2: force multiple IK solutions given a certain pose*/
+		// auto lead_fixed_pose = std::make_unique<stages::FixedCartesianPoses>("lead_fixed_pose");
+		// lead_fixed_pose->addPose(lead_goal_pose);
+		// lead_fixed_pose->setMonitoredStage(pre_move_stage_ptr);
 
-// 		auto ik_wrapper = std::make_unique<stages::ComputeIK>("move IK", std::move(lead_fixed_pose));
-// 		ik_wrapper->setGroup(lead_arm_group);
-// 		ik_wrapper->setEndEffector(lead_hand_group);
-// 		// ik_wrapper->properties().configureInitFrom(Stage::PARENT, { "eef", "group" });
-// 		ik_wrapper->properties().configureInitFrom(Stage::INTERFACE, {"target_pose" });
-// 		// ik_wrapper->properties().set("object", "object");
-// 		ik_wrapper->setMaxIKSolutions(30);
-// 		ik_wrapper->setMinSolutionDistance(1.0);
+		// auto ik_wrapper = std::make_unique<stages::ComputeIK>("move IK", std::move(lead_fixed_pose));
+		// ik_wrapper->setGroup(lead_arm_group);
+		// ik_wrapper->setEndEffector(lead_hand_group);
+		// // ik_wrapper->properties().configureInitFrom(Stage::PARENT, { "eef", "group" });
+		// ik_wrapper->properties().configureInitFrom(Stage::INTERFACE, {"target_pose" });
+		// // ik_wrapper->properties().set("object", "object");
+		// ik_wrapper->setMaxIKSolutions(30);
+		// ik_wrapper->setMinSolutionDistance(1.0);
 
-// 		ik_wrapper->setIKFrame(ik_frame_2, "panda_2_hand");
+		// ik_wrapper->setIKFrame(ik_frame_2, "panda_2_hand");
 
-// 		auto cl_cost{ std::make_unique<cost::Clearance>() };
-// 		cl_cost->cumulative = true;  // sum up pairwise distances between the robot to all objects?
-// 		cl_cost->with_world = true;  // consider distance of the robot to world objects?
-// 		ik_wrapper->setCostTerm(std::move(cl_cost));
+		// auto cl_cost{ std::make_unique<cost::Clearance>() };
+		// cl_cost->cumulative = true;  // sum up pairwise distances between the robot to all objects?
+		// cl_cost->with_world = true;  // consider distance of the robot to world objects?
+		// ik_wrapper->setCostTerm(std::move(cl_cost));
 			
-// 		grasp->insert(std::move(ik_wrapper));
+		// grasp->insert(std::move(ik_wrapper));
 
-// 		// t.add(std::move(move_to_object));
-// 		}
+		// // t.add(std::move(move_to_object));
+		// }
 
 		/****************************************************
   ---- *               Connect to next stage                 *
@@ -462,7 +476,17 @@ Task createTaskRaw(std::string& goal_frame_name, std::vector<double>& leader_goa
 			grasp->insert(std::move(stage));
 		}
 
-		t.add(std::move(grasp));
+		/****************************************************
+  ---- *                        Homing                        *
+		 ***************************************************/
+		{
+			auto stage = std::make_unique<stages::MoveTo>("back home", dual_pipeline);
+			stage->setGroup(dual_arm_group);
+			stage->setGoal("home");
+			grasp->insert(std::move(stage));
+		}
+
+	t.add(std::move(grasp));
 	}
 	
 	return t;
