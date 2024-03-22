@@ -90,7 +90,8 @@ public:
 	void compute() override;
 
 	void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }
-	void setGroup(const std::vector<std::string>& groups) { setProperty("groups", groups); }
+	void setSubGroups(const std::vector<std::string>& groups) { setProperty("groups", groups); }
+	void setGroup(const std::string& group) { setProperty("group", group); }
 
 	/// setters for IK frame
 	void setIKFrame(GroupPoseDict& poses) { setProperty("ik_frames", poses); }

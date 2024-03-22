@@ -57,7 +57,8 @@ ComputeIKMultiple::ComputeIKMultiple(const std::string& name, Stage::pointer&& c
 	auto& p = properties();
 	
 	p.declare<GroupStringDict>("eefs", "vector of names of end-effector group");
-	p.declare<std::vector<std::string>>("groups", "name of active group (derived from eef if not provided)");
+	p.declare<std::vector<std::string>>("groups", "name of active subgroups (derived from eef if not provided)");
+	p.declare<std::string>("group", "name of active group (derived from eef if not provided)");
 	p.declare<std::string>("default_poses", "", "default joint pose of active group (defines cost of IK)");
 
 	p.declare<uint32_t>("max_ik_solutions", 1);
@@ -238,10 +239,10 @@ void ComputeIKMultiple::init(const moveit::core::RobotModelConstPtr& robot_model
 	const moveit::core::JointModelGroup* jmg = nullptr;
 	std::string msg;
 
-	std::vector<std::string> group_names = props.get<std::vector<std::string>>("groups");
+	// std::vector<std::string> group_names = props.get<std::vector<std::string>>("groups");
 	
 	// Validate one robot group at a time
-	for (auto& group_name : group_names) {
+	for (auto& group_name : group_names_) {
 		if (!validateEEF(props, robot_model, eef_jmg, &msg, group_name))
 			errors.push_back(*this, msg);
 		if (!validateGroup(props, robot_model, eef_jmg, jmg, &msg, group_name))
@@ -290,7 +291,7 @@ void ComputeIKMultiple::compute() {
 
 	GroupPoseDict target_poses = props.get<GroupPoseDict>("target_poses");
 	const GroupPoseDict& ik_frames = props.get<GroupPoseDict>("ik_frames");
-	const std::vector<std::string>& group_names = props.get<std::vector<std::string>>("groups");
+	// const std::vector<std::string>& group_names = props.get<std::vector<std::string>>("groups");
 	
 	// vectors to store multiple poses and tips for non-chain IK
 	EigenSTL::vector_Isometry3d multiple_target_pose;
@@ -303,7 +304,7 @@ void ComputeIKMultiple::compute() {
 	moveit::core::RobotState sandbox_state{ scene->getCurrentState() };
 
 	// compute IK for each robot
-	for (auto& group_name : group_names) {
+	for (auto& group_name : group_names_) {
 	// std::string group_name = group_names[0];
 	if (!validateEEF(props, robot_model, eef_jmg, &msg, group_name)) {
 		ROS_WARN_STREAM_NAMED("ComputeIKMultiple", msg);

@@ -7,12 +7,15 @@ find_package(catkin REQUIRED COMPONENTS
 	moveit_task_constructor_core
 	moveit_ros_planning_interface
 	rosparam_shortcuts
+	moveit_visual_tools
 )
 
 moveit_build_options()
 
 catkin_package(
-	CATKIN_DEPENDS roscpp
+	CATKIN_DEPENDS 
+	roscpp
+	moveit_visual_tools
 )
 
 add_library(${PROJECT_NAME}_pick_place_task src/pick_place_task.cpp)
@@ -47,7 +50,10 @@ demo(ik_clearance_cost)
 demo(fallbacks_move_to)
 demo(pick)
 demo(dual_pick)
+demo(dual_pick_backup)
 demo(pick_place_demo)
+demo(test_properties_map)
+demo(line_tracking)
 target_link_libraries(${PROJECT_NAME}_pick_place_demo ${PROJECT_NAME}_pick_place_task)
 
 catkin_install_python(PROGRAMS

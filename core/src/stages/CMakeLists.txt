@@ -9,6 +9,7 @@ add_library(${PROJECT_NAME}_stages
 	${PROJECT_INCLUDE}/stages/generate_pose.h
 	${PROJECT_INCLUDE}/stages/generate_grasp_pose.h
 	${PROJECT_INCLUDE}/stages/generate_grasp_pose_follower.h
+	${PROJECT_INCLUDE}/stages/generate_grasp_pose_dual.h
 	${PROJECT_INCLUDE}/stages/generate_place_pose.h
 	${PROJECT_INCLUDE}/stages/compute_ik.h
 	${PROJECT_INCLUDE}/stages/compute_ik_multiple.h
@@ -32,6 +33,7 @@ add_library(${PROJECT_NAME}_stages
 	generate_pose.cpp
 	generate_grasp_pose.cpp
 	generate_grasp_pose_follower.cpp
+	generate_grasp_pose_dual.cpp
 	generate_place_pose.cpp
 	compute_ik.cpp
 	compute_ik_multiple.cpp
