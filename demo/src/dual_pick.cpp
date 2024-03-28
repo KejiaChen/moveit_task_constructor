@@ -219,10 +219,10 @@ void setupDemoScene() {
 
 Task createTaskRaw(std::string& goal_frame_name) {
     std::string dual_arm_group = "dual_arm";
-    std::string follow_arm_group = "panda_2";
-    std::string lead_arm_group = "panda_1";
-    std::string follow_hand_group = "hand_2";
-    std::string lead_hand_group = "hand_1";
+    std::string follow_arm_group = "panda_2"; // "left_arm"; //
+    std::string lead_arm_group = "panda_1"; // "right_arm"; //
+    std::string follow_hand_group = "hand_2"; // "left_hand"; //
+    std::string lead_hand_group = "hand_1"; // "right_hand"; //
 
 	Task t;
     t.stages()->setName("Pick");
@@ -335,6 +335,7 @@ Task createTaskRaw(std::string& goal_frame_name) {
 		std::vector<std::string> ik_groups = {lead_arm_group, follow_arm_group};
 		GroupStringDict ik_endeffectors = {{lead_arm_group, lead_hand_group}, {follow_arm_group, follow_hand_group}};
 		GroupStringDict ik_links = {{lead_arm_group, "panda_1_hand"}, {follow_arm_group, "panda_2_hand"}};
+		// GroupStringDict ik_links = {{lead_arm_group, "right_arm_hand"}, {follow_arm_group, "left_arm_hand"}};
 		GroupPoseMatrixDict ik_frames = {{lead_arm_group, ik_frame_1}, {follow_arm_group, ik_frame_2}};
 
 		auto ik_wrapper = std::make_unique<stages::ComputeIKMultiple>("move IK", std::move(dual_fixed_pose), ik_groups, dual_arm_group);
