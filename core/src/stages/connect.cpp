@@ -160,6 +160,7 @@ void Connect::compute(const InterfaceState& from, const InterfaceState& to) {
 		goal_state.update();
 		intermediate_scenes.push_back(end);
 
+		// plan for individual robot
 		robot_trajectory::RobotTrajectoryPtr trajectory;
 		success = pair.second->plan(start, end, jmg, timeout, trajectory, path_constraints);
 		sub_trajectories.push_back(trajectory);  // include failed trajectory

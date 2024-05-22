@@ -226,6 +226,7 @@ bool ComputeIK::canCompute() const {
 }
 
 void ComputeIK::compute() {
+	ROS_WARN_STREAM("ComputeIK");
 	if (WrapperBase::canCompute())
 		WrapperBase::compute();
 
@@ -306,8 +307,9 @@ void ComputeIK::compute() {
 		ik_pose = scene->getCurrentState().getFrameTransform(ik_pose_msg.header.frame_id) * ik_pose;
 		
 		// parent link of ik frame
-		// in this case is panda_link8
+		// in this case is panda_link7 (panda_link8 is connected to EE thorugh fixed joint)
 		link = scene->getCurrentState().getRigidlyConnectedParentLinkModel(ik_pose_msg.header.frame_id);
+		// ROS_WARN_STREAM("parent link of ik frame: " << link->getName());
 
 		// transform target pose such that ik frame will reach there if link (panda_link8) does
 		// get the desired flange pose when desired EE pose is reached
@@ -361,6 +363,12 @@ void ComputeIK::compute() {
 		compare_state.copyJointGroupPositions(jmg, compare_pose);
 	} else
 		scene->getCurrentState().copyJointGroupPositions(jmg, compare_pose);
+	
+	// ROS_WARN_STREAM("compare_pose: [");
+	// for(int i = 0; i < compare_pose.size(); ++i) {
+	// ROS_WARN_STREAM(compare_pose[i] << " "); 
+	// }
+	// ROS_WARN_STREAM("]");
 
 	double min_solution_distance = props.get<double>("min_solution_distance");
 
@@ -403,7 +411,7 @@ void ComputeIK::compute() {
 		tried_current_state_as_seed = true;
 
 		size_t previous = ik_solutions.size();
-		// this only represenets whether we can set joint position to achieve thistarget_pose by computing IK
+		// this only represenets whether we can set joint position to achieve this target_pose by computing IK
 		bool succeeded = sandbox_state.setFromIK(jmg, target_pose, link->getName(), remaining_time, is_valid);
 
 		auto now = std::chrono::steady_clock::now();
@@ -423,7 +431,7 @@ void ComputeIK::compute() {
 				solution.setCost(s.cost() + jmg->distance(ik_solutions[i].joint_positions.data(), compare_pose.data()));
 			else {  // found an IK solution, but this was not valid
 				std::stringstream ss;
-				ss << "Collision between '" << ik_solutions[i].contact.body_name_1 << "' and '"
+				ss << s.comment() << " Collision between '" << ik_solutions[i].contact.body_name_1 << "' and '"
 				   << ik_solutions[i].contact.body_name_2 << "'";
 				solution.markAsFailure(ss.str());
 			}
