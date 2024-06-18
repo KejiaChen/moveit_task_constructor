@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <launch>
   <!-- Load panda demo with MTC's execution capability -->
-  <include file="$(find moveit_resources_dual_panda_moveit_config)/launch/demo_isaac.launch">
-  <!-- <include file="$(find moveit_resources_dual_panda_moveit_config)/launch/demo.launch"> -->
+  <!-- <include file="$(find moveit_resources_dual_panda_moveit_config)/launch/demo_isaac.launch"> -->
+  <include file="$(find moveit_resources_dual_panda_moveit_config)/launch/demo.launch">
   <!-- <include file="$(find panda_multiple_arms_moveit_config)/launch/demo.launch"> -->
     <arg name="use_rviz" value="false"/>
   </include>

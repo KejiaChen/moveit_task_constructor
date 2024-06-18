@@ -248,6 +248,8 @@ double Clearance::operator()(const SubTrajectory& s, std::string& comment) const
 
 	const auto& state{ (mode == Mode::END_INTERFACE) ? s.end() : s.start() };
 
+	ROS_WARN_STREAM("Clearance group_property: " << group_property);
+
 	// prefer interface state property over stage property to find group_name
 	// TODO: This pattern is general enough to justify its own interface (in the properties?).
 	auto& state_properties{ state->properties() };

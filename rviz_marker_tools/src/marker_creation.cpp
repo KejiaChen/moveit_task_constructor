@@ -328,4 +328,19 @@ vm::Marker& makeFromGeometry(vm::Marker& m, const urdf::Geometry& geom) {
 	return m;
 }
 
+vm::Marker& makeLine(vm::Marker& m,
+                     const Eigen::Vector3d& start_point,
+                     const Eigen::Vector3d& end_point,
+                     double diameter)
+{
+    m.type = vm::Marker::LINE_STRIP;
+    m.scale.x = diameter;
+
+    m.points.resize(2);
+    m.points[0] = tf2::toMsg(start_point);
+    m.points[1] = tf2::toMsg(end_point);
+
+    return m;
+}
+
 }  // namespace rviz_marker_tools

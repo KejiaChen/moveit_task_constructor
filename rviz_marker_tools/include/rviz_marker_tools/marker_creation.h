@@ -78,6 +78,8 @@ visualization_msgs::Marker& makeText(visualization_msgs::Marker& m, const std::s
 /// create marker from urdf::Geom
 visualization_msgs::Marker& makeFromGeometry(visualization_msgs::Marker& m, const urdf::Geometry& geom);
 
+visualization_msgs::Marker& makeLine(visualization_msgs::Marker& m, const Eigen::Vector3d& start_point, const Eigen::Vector3d& end_point, double diameter);
+
 template <typename T>
 void appendFrame(T& container, const geometry_msgs::PoseStamped& pose, double scale = 1.0,
                  const std::string& ns = "frame", double diameter_fraction = 0.1) {

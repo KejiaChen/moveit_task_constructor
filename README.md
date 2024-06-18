@@ -7,6 +7,8 @@ The framework enables the hierarchical organization of basic stages using *conta
 
 ## Grasp Planning with Dual-arm Setup
 ```
+cd MoveItWorkspace
 roslaunch moveit_task_constructor_demo dual_demo.launch
+python src/panda_dual_arms/fixture_scene.py -c /home/tp2/Documents/mios-wiring/clip_info_20240429_transform.pickle
 rosrun moveit_task_constructor_demo dual_pick
 ```
