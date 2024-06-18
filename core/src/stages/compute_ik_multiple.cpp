@@ -100,7 +100,7 @@ void ComputeIKMultiple::setTargetPose(std::map<std::string, Eigen::Isometry3d>& 
 struct IKSolution
 {
 	std::vector<double> joint_positions;
-	bool feasible;
+	bool collision_free;
 	collision_detection::Contact contact;
 };
 
@@ -469,12 +469,12 @@ void ComputeIKMultiple::compute() {
 		req.max_contacts = 1;
 		req.group_name = jmg->getName();
 		scene->checkCollision(req, res, *state);
-		// solution.feasible represents if collision
-		solution.feasible = ignore_collisions || !res.collision;
+		// solution.collision_free represents if collision
+		solution.collision_free = ignore_collisions || !res.collision;
 		if (!res.contacts.empty()) {
 			solution.contact = res.contacts.begin()->second.front();
 		}
-		return solution.feasible;
+		return solution.collision_free;
 	};
 
 	uint32_t max_ik_solutions = props.get<uint32_t>("max_ik_solutions");
@@ -507,7 +507,7 @@ void ComputeIKMultiple::compute() {
 			solution.setComment(s.comment());
 			std::copy(frame_markers.begin(), frame_markers.end(), std::back_inserter(solution.markers()));
 
-			if (ik_solutions[i].feasible)
+			if (ik_solutions[i].collision_free)
 				//TODO@KejiaChen: How does computeCost work?
 				// compute cost as distance to compare_pose
 				solution.setCost(s.cost() + jmg->distance(ik_solutions[i].joint_positions.data(), compare_pose.data()));

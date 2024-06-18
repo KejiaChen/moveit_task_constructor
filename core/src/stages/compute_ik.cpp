@@ -229,7 +229,7 @@ bool ComputeIK::canCompute() const {
 }
 
 void ComputeIK::compute() {
-	ROS_WARN_STREAM("ComputeIK");
+ROS_WARN_STREAM("ComputeIK");
 	if (WrapperBase::canCompute())
 		WrapperBase::compute();
 
@@ -299,7 +299,7 @@ void ComputeIK::compute() {
 	} else {
 		ik_pose_msg = boost::any_cast<geometry_msgs::PoseStamped>(value);
 		Eigen::Isometry3d ik_pose;
-		// this ik_pose is pose of EE (finger tip) in panda_hand frame
+// this ik_pose is pose of EE (finger tip) in panda_hand frame
 		tf2::fromMsg(ik_pose_msg.pose, ik_pose);
 
 		if (!scene->getCurrentState().knowsFrameTransform(ik_pose_msg.header.frame_id)) {
@@ -307,21 +307,21 @@ void ComputeIK::compute() {
 			                      fmt::format("ik frame unknown in robot: '{}'", ik_pose_msg.header.frame_id));
 			return;
 		}
-		// this generated ik_pose below is pose of EE (finger tip) in world frame
+// this generated ik_pose below is pose of EE (finger tip) in world frame
 		ik_pose = scene->getCurrentState().getFrameTransform(ik_pose_msg.header.frame_id) * ik_pose;
-		
-		// parent link of ik frame
+
+// parent link of ik frame
 		// in this case is panda_link7 (panda_link8 is connected to EE thorugh fixed joint)
 		link = scene->getCurrentState().getRigidlyConnectedParentLinkModel(ik_pose_msg.header.frame_id);
-		// ROS_WARN_STREAM("parent link of ik frame: " << link->getName());
+// ROS_WARN_STREAM("parent link of ik frame: " << link->getName());
 
 		// transform target pose such that ik frame will reach there if link (panda_link8) does
-		// get the desired flange pose when desired EE pose is reached
+// get the desired flange pose when desired EE pose is reached
 		target_pose = target_pose * ik_pose.inverse() * scene->getCurrentState().getFrameTransform(link->getName());
 	}
 
 	// validate placed link for collisions
-	// only check EE link, i.e. links after pand_link8
+// only check EE link, i.e. links after pand_link8
 	collision_detection::CollisionResult collisions;
 	moveit::core::RobotState sandbox_state{ scene->getCurrentState() };
 	bool colliding =
@@ -360,15 +360,15 @@ void ComputeIK::compute() {
 	// determine joint values of robot pose to compare IK solution with for costs
 	std::vector<double> compare_pose;
 	const std::string& compare_pose_name = props.get<std::string>("default_pose");
-	// get compare_pose
+// get compare_pose
 	if (!compare_pose_name.empty()) {
 		moveit::core::RobotState compare_state(robot_model);
 		compare_state.setToDefaultValues(jmg, compare_pose_name);
 		compare_state.copyJointGroupPositions(jmg, compare_pose);
 	} else
 		scene->getCurrentState().copyJointGroupPositions(jmg, compare_pose);
-	
-	// ROS_WARN_STREAM("compare_pose: [");
+
+// ROS_WARN_STREAM("compare_pose: [");
 	// for(int i = 0; i < compare_pose.size(); ++i) {
 	// ROS_WARN_STREAM(compare_pose[i] << " "); 
 	// }
@@ -404,7 +404,7 @@ void ComputeIK::compute() {
 		req.max_contacts = 1;
 		req.group_name = jmg->getName();
 		scene->checkCollision(req, res, *state);
-		solution.feasible = ignore_collisions || !res.collision;
+		solution.collision_free = ignore_collisions || !res.collision;
 		if (!res.contacts.empty()) {
 			solution.contact = res.contacts.begin()->second.front();
 		}
