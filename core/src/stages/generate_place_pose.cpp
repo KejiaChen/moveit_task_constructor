@@ -114,8 +114,9 @@ void GeneratePlacePose::compute() {
 			for (uint i = 0; i < z_rotations; ++i) {
 				// rotate object at target pose about world's z-axis
 				Eigen::Vector3d pos = object.translation();
+				double rotate_angle = i * 2. * M_PI / z_rotations;
 				object.pretranslate(-pos)
-				    .prerotate(Eigen::AngleAxisd(i * 2. * M_PI / z_rotations, Eigen::Vector3d::UnitZ()))
+				    .prerotate(Eigen::AngleAxisd(rotate_angle, Eigen::Vector3d::UnitZ()))
 				    .pretranslate(pos);
 
 				// target ik_frame's pose w.r.t. planning frame
@@ -130,6 +131,8 @@ void GeneratePlacePose::compute() {
 
 				SubTrajectory trajectory;
 				trajectory.setCost(0.0);
+				std::string msg = "rotation angle: " + std::to_string(rotate_angle) + " flip: " + std::to_string(z_flips);
+				trajectory.setComment(msg);
 				rviz_marker_tools::appendFrame(trajectory.markers(), target_pose_msg, 0.1, "place frame");
 
 				spawn(std::move(state), std::move(trajectory));

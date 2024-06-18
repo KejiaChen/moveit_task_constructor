@@ -34,7 +34,7 @@
  *********************************************************************/
 /* Authors: Robert Haschke, Michael Goerner */
 
-#include <moveit/task_constructor/stages/compute_ik.h>
+#include <moveit/task_constructor/stages/compute_ik_multiple.h>
 #include <moveit/task_constructor/storage.h>
 #include <moveit/task_constructor/marker_tools.h>
 
@@ -48,40 +48,51 @@
 #include <functional>
 #include <iterator>
 #include <ros/console.h>
-#include <fmt/core.h>
 
 namespace moveit {
 namespace task_constructor {
 namespace stages {
 
-ComputeIK::ComputeIK(const std::string& name, Stage::pointer&& child) : WrapperBase(name, std::move(child)) {
+ComputeIKMultiple::ComputeIKMultiple(const std::string& name, Stage::pointer&& child, const std::vector<std::string>& group_names, const std::string& whole_body_group) : WrapperBase(name, std::move(child)), group_names_(std::move(group_names)), whole_body_group_(whole_body_group){
 	auto& p = properties();
-	p.declare<std::string>("eef", "name of end-effector group");
+	
+	p.declare<GroupStringDict>("eefs", "vector of names of end-effector group");
+	p.declare<std::vector<std::string>>("groups", "name of active subgroups (derived from eef if not provided)");
 	p.declare<std::string>("group", "name of active group (derived from eef if not provided)");
-	p.declare<std::string>("default_pose", "", "default joint pose of active group (defines cost of IK)");
+	p.declare<std::string>("default_poses", "", "default joint pose of active group (defines cost of IK)");
+
 	p.declare<uint32_t>("max_ik_solutions", 1);
 	p.declare<bool>("ignore_collisions", false);
 	p.declare<double>("min_solution_distance", 0.1,
 	                  "minimum distance between seperate IK solutions for the same target");
-	p.declare<moveit_msgs::Constraints>("constraints", moveit_msgs::Constraints(), "additional constraints to obey");
 
 	// ik_frame and target_pose are read from the interface
-	p.declare<geometry_msgs::PoseStamped>("ik_frame", "frame to be moved towards goal pose");
-	p.declare<geometry_msgs::PoseStamped>("target_pose", "goal pose for ik frame");
+	p.declare<GroupPoseDict>("ik_frames", "frame to be moved towards goal pose");
+	p.declare<GroupPoseDict>("target_poses", "goal pose for ik frame");
+
 }
 
-void ComputeIK::setIKFrame(const Eigen::Isometry3d& pose, const std::string& link) {
-	geometry_msgs::PoseStamped pose_msg;
-	pose_msg.header.frame_id = link;
-	pose_msg.pose = tf2::toMsg(pose);
-	setIKFrame(pose_msg);
+void ComputeIKMultiple::setIKFrame(std::map<std::string, Eigen::Isometry3d>& poses, GroupStringDict& links) {
+	GroupPoseDict pose_msgs;
+	for (int i=0; i<group_names_.size(); ++i) {
+		geometry_msgs::PoseStamped pose_msg;
+		std::string group = group_names_[i];
+		pose_msg.header.frame_id = links[group];
+		pose_msg.pose = tf2::toMsg(poses[group]);
+		pose_msgs[group] = pose_msg;
+	}
+	setIKFrame(pose_msgs);
 }
 
-void ComputeIK::setTargetPose(const Eigen::Isometry3d& pose, const std::string& frame) {
-	geometry_msgs::PoseStamped pose_msg;
-	pose_msg.header.frame_id = frame;
-	pose_msg.pose = tf2::toMsg(pose);
-	setTargetPose(pose_msg);
+void ComputeIKMultiple::setTargetPose(std::map<std::string, Eigen::Isometry3d>& poses, GroupStringDict& frames) {
+	GroupPoseDict pose_msgs;
+	for (int i=0; i<group_names_.size(); ++i) {
+		geometry_msgs::PoseStamped pose_msg;
+		pose_msg.header.frame_id = frames[group_names_[i]];
+		pose_msg.pose = tf2::toMsg(poses[group_names_[i]]);
+		pose_msgs[group_names_[i]] = pose_msg;
+	}
+	setTargetPose(pose_msgs);
 }
 
 // found IK solutions
@@ -89,9 +100,8 @@ void ComputeIK::setTargetPose(const Eigen::Isometry3d& pose, const std::string& 
 struct IKSolution
 {
 	std::vector<double> joint_positions;
-	collision_detection::Contact contact;
 	bool collision_free;
-	bool satisfies_constraints;
+	collision_detection::Contact contact;
 };
 
 using IKSolutions = std::vector<IKSolution>;
@@ -105,6 +115,7 @@ bool isTargetPoseCollidingInEEF(const planning_scene::PlanningSceneConstPtr& sce
                                 const moveit::core::LinkModel* link, const moveit::core::JointModelGroup* jmg = nullptr,
                                 collision_detection::CollisionResult* collision_result = nullptr) {
 	// consider all rigidly connected parent links as well
+	// TODO@KejiaChen: does this include only single arm or dual arms?
 	const moveit::core::LinkModel* parent = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link);
 	if (parent != link)  // transform pose into pose suitable to place parent
 		pose = pose * robot_state.getGlobalLinkTransform(link).inverse() * robot_state.getGlobalLinkTransform(parent);
@@ -122,7 +133,7 @@ bool isTargetPoseCollidingInEEF(const planning_scene::PlanningSceneConstPtr& sce
 		const moveit::core::JointModel* joint = link->getParentJointModel();
 		parent = joint->getParentLinkModel();
 
-		if (joint->getType() != moveit::core::JointModel::FIXED) {
+		if (joint->getType() != moveit::core::JointModel::FIXED) { //except links fixed to root
 			for (const std::string* name : pending_links)
 				acm.setDefaultEntry(*name, true);
 			pending_links.clear();
@@ -151,28 +162,49 @@ std::string listCollisionPairs(const collision_detection::CollisionResult::Conta
 	return result;
 }
 
-bool validateEEF(const PropertyMap& props, const moveit::core::RobotModelConstPtr& robot_model,
-                 const moveit::core::JointModelGroup*& jmg, std::string* msg) {
+bool validateMultipleEEF(const PropertyMap& props, const moveit::core::RobotModelConstPtr& robot_model,
+                 const moveit::core::JointModelGroup*& jmg, std::string* msg, std::string group_name) {
 	try {
-		const std::string& eef = props.get<std::string>("eef");
-		if (!robot_model->hasEndEffector(eef)) {
-			if (msg)
-				*msg = "Unknown end effector: " + eef;
-			return false;
-		} else
-			jmg = robot_model->getEndEffector(eef);
+		const GroupStringDict& eefs = props.get<GroupStringDict>("eefs");
+		for (const auto& pair : eefs) {
+			// const std::string& eef = eefs.at(group_name);
+			const std::string& eef = pair.second;
+			if (!robot_model->hasEndEffector(eef)) {
+				if (msg)
+					*msg = "Unknown end effector: " + eef;
+				return false;
+			} else
+				jmg = robot_model->getEndEffector(eef);
+		}
 	} catch (const Property::undefined&) {
 	}
 	return true;
 }
+
+bool validateEEF(const PropertyMap& props, const moveit::core::RobotModelConstPtr& robot_model,
+                 const moveit::core::JointModelGroup*& jmg, std::string* msg, std::string group_name) {
+	try {
+		const GroupStringDict& eefs = props.get<GroupStringDict>("eefs");
+		const std::string& eef = eefs.at(group_name);
+			if (!robot_model->hasEndEffector(eef)) {
+				if (msg)
+					*msg = "Unknown end effector: " + eef;
+				return false;
+			} else
+				jmg = robot_model->getEndEffector(eef);
+	} catch (const Property::undefined&) {
+	}
+	return true;
+}
+
 bool validateGroup(const PropertyMap& props, const moveit::core::RobotModelConstPtr& robot_model,
                    const moveit::core::JointModelGroup* eef_jmg, const moveit::core::JointModelGroup*& jmg,
-                   std::string* msg) {
+                   std::string* msg, std::string group_name) {
 	try {
-		const std::string& group = props.get<std::string>("group");
-		if (!(jmg = robot_model->getJointModelGroup(group))) {
+		// const std::string& group = props.get<std::string>("group");
+		if (!(jmg = robot_model->getJointModelGroup(group_name))) {
 			if (msg)
-				*msg = "Unknown group: " + group;
+				*msg = "Unknown group: " + group_name;
 			return false;
 		}
 	} catch (const Property::undefined&) {
@@ -187,15 +219,15 @@ bool validateGroup(const PropertyMap& props, const moveit::core::RobotModelConst
 
 }  // anonymous namespace
 
-void ComputeIK::reset() {
+void ComputeIKMultiple::reset() {
 	upstream_solutions_.clear();
 	WrapperBase::reset();
 }
 
-void ComputeIK::init(const moveit::core::RobotModelConstPtr& robot_model) {
+void ComputeIKMultiple::init(const moveit::core::RobotModelConstPtr& robot_model) {
 	InitStageException errors;
 	try {
-		WrapperBase::init(robot_model);
+		WrapperBase::init(robot_model); // is the robot model the whole dual-arm robot?
 	} catch (InitStageException& e) {
 		errors.append(e);
 	}
@@ -207,16 +239,21 @@ void ComputeIK::init(const moveit::core::RobotModelConstPtr& robot_model) {
 	const moveit::core::JointModelGroup* jmg = nullptr;
 	std::string msg;
 
-	if (!validateEEF(props, robot_model, eef_jmg, &msg))
-		errors.push_back(*this, msg);
-	if (!validateGroup(props, robot_model, eef_jmg, jmg, &msg))
-		errors.push_back(*this, msg);
+	// std::vector<std::string> group_names = props.get<std::vector<std::string>>("groups");
+	
+	// Validate one robot group at a time
+	for (auto& group_name : group_names_) {
+		if (!validateEEF(props, robot_model, eef_jmg, &msg, group_name))
+			errors.push_back(*this, msg);
+		if (!validateGroup(props, robot_model, eef_jmg, jmg, &msg, group_name))
+			errors.push_back(*this, msg);
+	}
 
 	if (errors)
 		throw errors;
 }
 
-void ComputeIK::onNewSolution(const SolutionBase& s) {
+void ComputeIKMultiple::onNewSolution(const SolutionBase& s) {
 	assert(s.start() && s.end());
 	assert(s.start()->scene() == s.end()->scene());  // wrapped child should be a generator
 
@@ -224,12 +261,12 @@ void ComputeIK::onNewSolution(const SolutionBase& s) {
 	upstream_solutions_.push(&s);
 }
 
-bool ComputeIK::canCompute() const {
+bool ComputeIKMultiple::canCompute() const {
 	return !upstream_solutions_.empty() || WrapperBase::canCompute();
 }
 
-void ComputeIK::compute() {
-ROS_WARN_STREAM("ComputeIK");
+void ComputeIKMultiple::compute() {
+	ROS_WARN_STREAM("ComputeIKMultiple");
 	if (WrapperBase::canCompute())
 		WrapperBase::compute();
 
@@ -252,22 +289,41 @@ ROS_WARN_STREAM("ComputeIK");
 	const moveit::core::JointModelGroup* jmg = nullptr;
 	std::string msg;
 
-	if (!validateEEF(props, robot_model, eef_jmg, &msg)) {
-		ROS_WARN_STREAM_NAMED("ComputeIK", msg);
+	GroupPoseDict target_poses = props.get<GroupPoseDict>("target_poses");
+	const GroupPoseDict& ik_frames = props.get<GroupPoseDict>("ik_frames");
+	// const std::vector<std::string>& group_names = props.get<std::vector<std::string>>("groups");
+	
+	// vectors to store multiple poses and tips for non-chain IK
+	EigenSTL::vector_Isometry3d multiple_target_pose;
+	std::vector<std::string> multiple_tips;
+
+	// bring some declarations out of the loop
+	std::deque<visualization_msgs::Marker> frame_markers;
+	std::deque<visualization_msgs::Marker> eef_markers;
+	std::vector<double> compare_pose;
+	moveit::core::RobotState sandbox_state{ scene->getCurrentState() };
+
+	// compute IK for each robot
+	for (auto& group_name : group_names_) {
+	// std::string group_name = group_names[0];
+	if (!validateEEF(props, robot_model, eef_jmg, &msg, group_name)) {
+		ROS_WARN_STREAM_NAMED("ComputeIKMultiple", msg);
 		return;
 	}
-	if (!validateGroup(props, robot_model, eef_jmg, jmg, &msg)) {
-		ROS_WARN_STREAM_NAMED("ComputeIK", msg);
+	if (!validateGroup(props, robot_model, eef_jmg, jmg, &msg, group_name)) {
+		ROS_WARN_STREAM_NAMED("ComputeIKMultiple", msg);
 		return;
 	}
 	if (!eef_jmg && !jmg) {
-		ROS_WARN_STREAM_NAMED("ComputeIK", "Neither eef nor group are well defined");
+		ROS_WARN_STREAM_NAMED("ComputeIKMultiple", "Neither eef nor group are well defined");
 		return;
 	}
+
 	properties().property("timeout").setDefaultValue(jmg->getDefaultIKTimeout());
 
 	// extract target_pose
-	geometry_msgs::PoseStamped target_pose_msg = props.get<geometry_msgs::PoseStamped>("target_pose");
+	// geometry_msgs::PoseStamped target_pose_msg = props.get<geometry_msgs::PoseStamped>("target_pose");
+	geometry_msgs::PoseStamped target_pose_msg = target_poses[group_name];
 	if (target_pose_msg.header.frame_id.empty())  // if not provided, assume planning frame
 		target_pose_msg.header.frame_id = scene->getPlanningFrame();
 
@@ -275,7 +331,7 @@ ROS_WARN_STREAM("ComputeIK");
 	tf2::fromMsg(target_pose_msg.pose, target_pose);
 	if (target_pose_msg.header.frame_id != scene->getPlanningFrame()) {
 		if (!scene->knowsFrameTransform(target_pose_msg.header.frame_id)) {
-			ROS_WARN_STREAM_NAMED("ComputeIK",
+			ROS_WARN_STREAM_NAMED("ComputeIKMultiple",
 			                      "Unknown reference frame for target pose: " << target_pose_msg.header.frame_id);
 			return;
 		}
@@ -286,12 +342,13 @@ ROS_WARN_STREAM("ComputeIK");
 	// determine IK link from ik_frame
 	const moveit::core::LinkModel* link = nullptr;
 	geometry_msgs::PoseStamped ik_pose_msg;
-	const boost::any& value = props.get("ik_frame");
+	// const boost::any& value = props.get("ik_frame");
+	const boost::any& value = ik_frames.at(group_name);
 	if (value.empty()) {  // property undefined
 		//  determine IK link from eef/group
 		if (!(link = eef_jmg ? robot_model->getLinkModel(eef_jmg->getEndEffectorParentGroup().second) :
-                             jmg->getOnlyOneEndEffectorTip())) {
-			ROS_WARN_STREAM_NAMED("ComputeIK", "Failed to derive IK target link");
+		                       jmg->getOnlyOneEndEffectorTip())) {
+			ROS_WARN_STREAM_NAMED("ComputeIKMultiple", "Failed to derive IK target link");
 			return;
 		}
 		ik_pose_msg.header.frame_id = link->getName();
@@ -299,40 +356,43 @@ ROS_WARN_STREAM("ComputeIK");
 	} else {
 		ik_pose_msg = boost::any_cast<geometry_msgs::PoseStamped>(value);
 		Eigen::Isometry3d ik_pose;
-// this ik_pose is pose of EE (finger tip) in panda_hand frame
+		// this ik_pose is pose of EE (finger tip) in panda_hand frame
 		tf2::fromMsg(ik_pose_msg.pose, ik_pose);
 
 		if (!scene->getCurrentState().knowsFrameTransform(ik_pose_msg.header.frame_id)) {
-			ROS_WARN_STREAM_NAMED("ComputeIK",
-			                      fmt::format("ik frame unknown in robot: '{}'", ik_pose_msg.header.frame_id));
+			ROS_WARN_STREAM_NAMED("ComputeIKMultiple", "ik frame unknown in robot: '" << ik_pose_msg.header.frame_id << "'");
 			return;
 		}
-// this generated ik_pose below is pose of EE (finger tip) in world frame
+		// this generated ik_pose below is pose of EE (finger tip) in world frame
 		ik_pose = scene->getCurrentState().getFrameTransform(ik_pose_msg.header.frame_id) * ik_pose;
-
-// parent link of ik frame
+		
+		// parent link of ik frame
 		// in this case is panda_link7 (panda_link8 is connected to EE thorugh fixed joint)
 		link = scene->getCurrentState().getRigidlyConnectedParentLinkModel(ik_pose_msg.header.frame_id);
-// ROS_WARN_STREAM("parent link of ik frame: " << link->getName());
 
 		// transform target pose such that ik frame will reach there if link (panda_link8) does
-// get the desired flange pose when desired EE pose is reached
+		// get the desired flange pose when desired EE pose is reached
 		target_pose = target_pose * ik_pose.inverse() * scene->getCurrentState().getFrameTransform(link->getName());
 	}
 
+	// add target pose and tip into vector
+	multiple_target_pose.push_back(target_pose);
+	multiple_tips.push_back(link->getName());
+
 	// validate placed link for collisions
-// only check EE link, i.e. links after pand_link8
+	// only check EE link, i.e. links after panda_link8
 	collision_detection::CollisionResult collisions;
-	moveit::core::RobotState sandbox_state{ scene->getCurrentState() };
+	// moveit::core::RobotState sandbox_state{ scene->getCurrentState() };
+	//TODO@KejiaChen: Set EE poses at one time for collision checking 
 	bool colliding =
 	    !ignore_collisions && isTargetPoseCollidingInEEF(scene, sandbox_state, target_pose, link, jmg, &collisions);
 
 	// frames at target pose and ik frame
-	std::deque<visualization_msgs::Marker> frame_markers;
+	// std::deque<visualization_msgs::Marker> frame_markers;
 	rviz_marker_tools::appendFrame(frame_markers, target_pose_msg, 0.1, "target frame");
 	rviz_marker_tools::appendFrame(frame_markers, ik_pose_msg, 0.1, "ik frame");
 	// end-effector markers
-	std::deque<visualization_msgs::Marker> eef_markers;
+	// std::deque<visualization_msgs::Marker> eef_markers;
 	// visualize placed end-effector
 	auto appender = [&eef_markers](visualization_msgs::Marker& marker, const std::string& /*name*/) {
 		marker.ns = "ik target";
@@ -358,29 +418,41 @@ ROS_WARN_STREAM("ComputeIK");
 		generateVisualMarkers(sandbox_state, appender, links_to_visualize);
 
 	// determine joint values of robot pose to compare IK solution with for costs
-	std::vector<double> compare_pose;
-	const std::string& compare_pose_name = props.get<std::string>("default_pose");
-// get compare_pose
+	// std::vector<double> compare_pose;
+	const std::string& compare_pose_name = props.get<std::string>("default_poses");
+	// get compare_pose
 	if (!compare_pose_name.empty()) {
 		moveit::core::RobotState compare_state(robot_model);
 		compare_state.setToDefaultValues(jmg, compare_pose_name);
 		compare_state.copyJointGroupPositions(jmg, compare_pose);
 	} else
-		scene->getCurrentState().copyJointGroupPositions(jmg, compare_pose);
-
-// ROS_WARN_STREAM("compare_pose: [");
+		scene->getCurrentState().copyJointGroupPositions(jmg, compare_pose); // use current pose as compare pose
+	
+	// ROS_WARN_STREAM("compare_pose: [");
 	// for(int i = 0; i < compare_pose.size(); ++i) {
 	// ROS_WARN_STREAM(compare_pose[i] << " "); 
 	// }
-	// ROS_WARN_STREAM("]");
+	// ROS_WARN_STREAM("]");	
+	
+	// loop end here for single joint group
+	}
+
+	
+	// Dual joint group
+	if (!(jmg = robot_model->getJointModelGroup(whole_body_group_))) {
+			std::string* msg;
+			if (msg)
+				*msg = "Unknown group: " + whole_body_group_;
+			ROS_WARN_STREAM_NAMED("ComputeIKMultiple", *msg);
+	}
+	// CHECK name of jmg
+	ROS_WARN_NAMED("ComputeIKMultiple", "IK solution group name: %s", jmg->getName().c_str());
+
+	IKSolutions ik_solutions;
 
 	double min_solution_distance = props.get<double>("min_solution_distance");
 
-	kinematic_constraints::KinematicConstraintSet constraint_set(robot_model);
-	constraint_set.add(props.get<moveit_msgs::Constraints>("constraints"), scene->getTransforms());
-
-	IKSolutions ik_solutions;
-	auto is_valid = [scene, ignore_collisions, min_solution_distance, &constraint_set = std::as_const(constraint_set),
+	auto is_valid = [scene, ignore_collisions, min_solution_distance,
 	                 &ik_solutions](moveit::core::RobotState* state, const moveit::core::JointModelGroup* jmg,
 	                                const double* joint_positions) {
 		for (const auto& sol : ik_solutions) {
@@ -388,28 +460,21 @@ ROS_WARN_STREAM("ComputeIK");
 				return false;  // too close to already found solution
 		}
 		state->setJointGroupPositions(jmg, joint_positions);
-		state->update();
-
-		ik_solutions.emplace_back();
+		ik_solutions.emplace_back(); // add new ik solution
 		auto& solution{ ik_solutions.back() };
 		state->copyJointGroupPositions(jmg, solution.joint_positions);
-
-		// validate constraints
-		solution.satisfies_constraints = constraint_set.decide(*state).satisfied;
-
-		// check for collisions
 		collision_detection::CollisionRequest req;
 		collision_detection::CollisionResult res;
 		req.contacts = true;
 		req.max_contacts = 1;
 		req.group_name = jmg->getName();
 		scene->checkCollision(req, res, *state);
+		// solution.collision_free represents if collision
 		solution.collision_free = ignore_collisions || !res.collision;
 		if (!res.contacts.empty()) {
 			solution.contact = res.contacts.begin()->second.front();
 		}
-
-		return solution.satisfies_constraints && solution.collision_free;
+		return solution.collision_free;
 	};
 
 	uint32_t max_ik_solutions = props.get<uint32_t>("max_ik_solutions");
@@ -425,8 +490,10 @@ ROS_WARN_STREAM("ComputeIK");
 		tried_current_state_as_seed = true;
 
 		size_t previous = ik_solutions.size();
+		// Notice: this is the main IK call
 		// this only represenets whether we can set joint position to achieve this target_pose by computing IK
-		bool succeeded = sandbox_state.setFromIK(jmg, target_pose, link->getName(), remaining_time, is_valid);
+		// bool succeeded = sandbox_state.setFromIK(jmg, target_pose, link->getName(), remaining_time, is_valid);
+		bool succeeded = sandbox_state.setFromIK(jmg, multiple_target_pose, multiple_tips, remaining_time, is_valid);
 
 		auto now = std::chrono::steady_clock::now();
 		remaining_time -= std::chrono::duration<double>(now - start_time).count();
@@ -440,16 +507,15 @@ ROS_WARN_STREAM("ComputeIK");
 			solution.setComment(s.comment());
 			std::copy(frame_markers.begin(), frame_markers.end(), std::back_inserter(solution.markers()));
 
-			if (ik_solutions[i].collision_free && ik_solutions[i].satisfies_constraints)
+			if (ik_solutions[i].collision_free)
+				//TODO@KejiaChen: How does computeCost work?
 				// compute cost as distance to compare_pose
 				solution.setCost(s.cost() + jmg->distance(ik_solutions[i].joint_positions.data(), compare_pose.data()));
-			else if (!ik_solutions[i].collision_free) {  // solution was in collision
+			else {  // found an IK solution, but this was not valid
 				std::stringstream ss;
 				ss << s.comment() << " Collision between '" << ik_solutions[i].contact.body_name_1 << "' and '"
 				   << ik_solutions[i].contact.body_name_2 << "'";
 				solution.markAsFailure(ss.str());
-			} else if (!ik_solutions[i].satisfies_constraints) {  // solution was violating constraints
-				solution.markAsFailure("Constraints violated");
 			}
 			// set scene's robot state
 			moveit::core::RobotState& solution_state = solution_scene->getCurrentStateNonConst();

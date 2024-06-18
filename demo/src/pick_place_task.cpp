@@ -36,6 +36,7 @@
 
 #include <moveit_task_constructor_demo/pick_place_task.h>
 #include <rosparam_shortcuts/rosparam_shortcuts.h>
+#include <actionlib/client/simple_action_client.h>
 
 namespace moveit_task_constructor_demo {
 
@@ -95,7 +96,7 @@ void setupDemoScene(ros::NodeHandle& pnh) {
 	// Add table and object to planning scene
 	ros::Duration(1.0).sleep();  // Wait for ApplyPlanningScene service
 	moveit::planning_interface::PlanningSceneInterface psi;
-	if (pnh.param("spawn_table", true))
+	if (pnh.param("spawn_table", true)) // parameter i
 		spawnObject(psi, createTable(pnh));
 	spawnObject(psi, createObject(pnh));
 }
@@ -169,10 +170,10 @@ bool PickPlaceTask::init() {
 
 	// Set task properties
 	t.setProperty("group", arm_group_name_);
-	t.setProperty("eef", eef_name_);
-	t.setProperty("hand", hand_group_name_);
-	t.setProperty("hand_grasping_frame", hand_frame_);
-	t.setProperty("ik_frame", hand_frame_);
+	t.setProperty("eef", eef_name_); // hand
+	t.setProperty("hand", hand_group_name_); //hand
+	t.setProperty("hand_grasping_frame", hand_frame_); //panda_link8
+	t.setProperty("ik_frame", hand_frame_); //panda_link8
 
 	/****************************************************
 	 *                                                  *
@@ -230,7 +231,9 @@ bool PickPlaceTask::init() {
 	Stage* pick_stage_ptr = nullptr;
 	{
 		auto grasp = std::make_unique<SerialContainer>("pick object");
+		// copy keys
 		t.properties().exposeTo(grasp->properties(), { "eef", "hand", "group", "ik_frame" });
+		// copy values
 		grasp->properties().configureInitFrom(Stage::PARENT, { "eef", "hand", "group", "ik_frame" });
 
 		/****************************************************
@@ -498,13 +501,13 @@ bool PickPlaceTask::execute() {
 	moveit_msgs::MoveItErrorCodes execute_result;
 
 	execute_result = task_->execute(*task_->solutions().front());
-	// // If you want to inspect the goal message, use this instead:
-	// actionlib::SimpleActionClient<moveit_task_constructor_msgs::ExecuteTaskSolutionAction>
-	// execute("execute_task_solution", true); execute.waitForServer();
-	// moveit_task_constructor_msgs::ExecuteTaskSolutionGoal execute_goal;
-	// task_->solutions().front()->toMsg(execute_goal.solution);
-	// execute.sendGoalAndWait(execute_goal);
-	// execute_result = execute.getResult()->error_code;
+	// If you want to inspect the goal message, use this instead:
+	actionlib::SimpleActionClient<moveit_task_constructor_msgs::ExecuteTaskSolutionAction>
+	execute("execute_task_solution", true); execute.waitForServer();
+	moveit_task_constructor_msgs::ExecuteTaskSolutionGoal execute_goal;
+	task_->solutions().front()->toMsg(execute_goal.solution);
+	execute.sendGoalAndWait(execute_goal);
+	execute_result = execute.getResult()->error_code;
 
 	if (execute_result.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
 		ROS_ERROR_STREAM_NAMED(LOGNAME, "Task execution failed and returned: " << execute_result.val);

@@ -301,8 +301,9 @@ public:
 
 	inline double cost() const { return cost_; }
 	void setCost(double cost);
+	double getCost() const;
 	void markAsFailure(const std::string& msg = std::string());
-	inline bool isFailure() const { return !std::isfinite(cost_); }
+	inline bool isFailure() const { return !std::isfinite(cost_); } // how to detect failure?
 
 	const std::string& comment() const { return comment_; }
 	void setComment(const std::string& comment) { comment_ = comment; }

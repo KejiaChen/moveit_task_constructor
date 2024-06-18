@@ -34,7 +34,7 @@
 
 /* Authors: Robert Haschke, Michael Goerner */
 
-#include <moveit/task_constructor/stages/generate_grasp_pose.h>
+#include <moveit/task_constructor/stages/generate_grasp_pose_follower.h>
 #include <moveit/task_constructor/storage.h>
 #include <moveit/task_constructor/marker_tools.h>
 #include <rviz_marker_tools/marker_creation.h>
@@ -49,12 +49,13 @@ namespace moveit {
 namespace task_constructor {
 namespace stages {
 
-GenerateGraspPose::GenerateGraspPose(const std::string& name) : GeneratePose(name) {
+GenerateGraspPoseFollow::GenerateGraspPoseFollow(const std::string& name) : GeneratePose(name) {
 	auto& p = properties();
 	p.declare<std::string>("eef", "name of end-effector");
 	p.declare<std::string>("object");
+    p.declare<std::vector<double>>("target_delta", {1, 0, 0}, "relative position of target pose in object frame");
 	p.declare<double>("angle_delta", 0.1, "angular steps (rad)");
-	p.declare<Eigen::Vector3d>("rotation_axis", Eigen::Vector3d::UnitZ(), "rotate object pose about given axis");
+    p.declare<std::string>("explr_axis", "x", "axis around which rotation is performed to spawn various grasps");
 
 	p.declare<boost::any>("pregrasp", "pregrasp posture");
 	p.declare<boost::any>("grasp", "grasp posture");
@@ -91,7 +92,7 @@ static void applyPreGrasp(moveit::core::RobotState& state, const moveit::core::J
 	throw moveit::Exception{ "no named pose or RobotState message" };
 }
 
-void GenerateGraspPose::init(const core::RobotModelConstPtr& robot_model) {
+void GenerateGraspPoseFollow::init(const core::RobotModelConstPtr& robot_model) {
 	InitStageException errors;
 	try {
 		GeneratePose::init(robot_model);
@@ -127,7 +128,7 @@ void GenerateGraspPose::init(const core::RobotModelConstPtr& robot_model) {
 		throw errors;
 }
 
-void GenerateGraspPose::onNewSolution(const SolutionBase& s) {
+void GenerateGraspPoseFollow::onNewSolution(const SolutionBase& s) {
 	planning_scene::PlanningSceneConstPtr scene = s.end()->scene();
 
 	const auto& props = properties();
@@ -141,7 +142,7 @@ void GenerateGraspPose::onNewSolution(const SolutionBase& s) {
 	upstream_solutions_.push(&s);
 }
 
-void GenerateGraspPose::compute() {
+void GenerateGraspPoseFollow::compute() {
 	if (upstream_solutions_.empty())
 		return;
 	planning_scene::PlanningScenePtr scene = upstream_solutions_.pop()->end()->scene()->diff();
@@ -160,19 +161,27 @@ void GenerateGraspPose::compute() {
 	}
 
 	geometry_msgs::PoseStamped target_pose_msg;
+    // By default, target pose is set to the origin of object frame
 	target_pose_msg.header.frame_id = props.get<std::string>("object");
-	Eigen::Vector3d rotation_axis = props.get<Eigen::Vector3d>("rotation_axis");
 
 	double current_angle = 0.0;
 	while (current_angle < 2. * M_PI && current_angle > -2. * M_PI) {
-		// rotate object pose about axis
-		Eigen::Isometry3d target_pose(Eigen::AngleAxisd(current_angle, rotation_axis));
+		// rotate object pose about selected axis
+		// Eigen::Isometry3d target_pose(Eigen::AngleAxisd(current_angle, Eigen::Vector3d::UnitZ()));
+        Eigen::Vector3d rotation_axis;
+        get_exploration_axis(rotation_axis);
+		Eigen::Isometry3d target_position(Eigen::Translation3d(props.get<std::vector<double>>("target_delta")[0], 
+														   	   props.get<std::vector<double>>("target_delta")[1], 
+														       props.get<std::vector<double>>("target_delta")[2]));
+		Eigen::Isometry3d target_pose = target_position * Eigen::AngleAxisd(current_angle, rotation_axis);
+        // Eigen::Isometry3d target_pose(Eigen::AngleAxisd(current_angle, rotation_axis));
 		current_angle += props.get<double>("angle_delta");
 
 		InterfaceState state(scene);
 		target_pose_msg.pose = tf2::toMsg(target_pose);
 		state.properties().set("target_pose", target_pose_msg);
 		props.exposeTo(state.properties(), { "pregrasp", "grasp" });
+		ROS_WARN_STREAM("Target pose: " << target_pose_msg.pose);
 
 		SubTrajectory trajectory;
 		trajectory.setCost(0.0);
@@ -181,10 +190,25 @@ void GenerateGraspPose::compute() {
 		// add frame at target pose
 		rviz_marker_tools::appendFrame(trajectory.markers(), target_pose_msg, 0.1, "grasp frame");
 
-		ROS_WARN_STREAM("GenerateGraspPose: spawn" << current_angle);
+		ROS_WARN_STREAM("GenerateGraspPoseFollow: spawn" << current_angle);
 		spawn(std::move(state), std::move(trajectory));
 	}
 }
+
+void GenerateGraspPoseFollow::get_exploration_axis(Eigen::Vector3d& rotation_axis) {
+    const auto& props = properties();
+    std::string axis = props.get<std::string>("explr_axis");
+    if (axis == "x") {
+        rotation_axis = Eigen::Vector3d::UnitX();
+    } else if (axis == "y") {
+        rotation_axis = Eigen::Vector3d::UnitY();
+    } else if (axis == "z") {
+        rotation_axis = Eigen::Vector3d::UnitZ();
+    } else {
+        throw std::runtime_error("exploration axis must be one of x, y, or z");
+    }
+}
+
 }  // namespace stages
 }  // namespace task_constructor
 }  // namespace moveit
