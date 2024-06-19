@@ -3,7 +3,7 @@
 #include <moveit/planning_scene/planning_scene.h>
 
 #include <moveit/task_constructor/task.h>
-
+#include <moveit/task_constructor/stages/current_state.h>
 #include <moveit/task_constructor/stages/fixed_state.h>
 #include <moveit/task_constructor/stages/compute_ik.h>
 
@@ -31,9 +31,9 @@ int main(int argc, char** argv) {
 	auto scene = std::make_shared<planning_scene::PlanningScene>(t.getRobotModel());
 	auto& robot_state = scene->getCurrentStateNonConst();
 	robot_state.setToDefaultValues();
-	[[maybe_unused]] bool found =
-	    robot_state.setToDefaultValues(robot_state.getJointModelGroup("panda_arm"), "extended");
-	assert(found);
+	// [[maybe_unused]] bool found =
+	//     robot_state.setToDefaultValues(robot_state.getJointModelGroup("panda_arm"), "extended");
+	// assert(found);
 
 	moveit_msgs::CollisionObject co;
 	co.id = "obstacle";
@@ -44,10 +44,17 @@ int main(int argc, char** argv) {
 	co.header.frame_id = t.getRobotModel()->getModelFrame();
 	co.primitive_poses.emplace_back();
 	co.primitive_poses[0].orientation.w = 1.0;
+	co.primitive_poses[0].position.x = 0.25;
 	co.primitive_poses[0].position.z = 0.85;
 	scene->processCollisionObjectMsg(co);
 
-	auto initial = std::make_unique<stages::FixedState>();
+	// Stage* initial_stage = new stages::CurrentState("current state");
+	// t.add(std::unique_ptr<Stage>(initial_stage));
+
+	// auto start = std::make_unique<stages::CurrentState>("current state");
+	// t.add(std::move(start));
+
+	auto initial = std::make_unique<stages::FixedState>("inital state");
 	initial->setState(scene);
 	initial->setIgnoreCollisions(true);
 

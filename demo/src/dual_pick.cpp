@@ -548,6 +548,42 @@ Task createTaskRaw(std::string& goal_frame_name) {
 	return t;
 }
 
+Task createTaskHome() {
+    std::string dual_arm_group = "dual_arm";
+    std::string follow_arm_group = "panda_2"; // "left_arm"; //
+    std::string lead_arm_group = "panda_1"; // "right_arm"; //
+    std::string follow_hand_group = "hand_2"; // "left_hand"; //
+    std::string lead_hand_group = "hand_1"; // "right_hand"; //
+
+	Task t;
+    t.stages()->setName("Pick");
+    t.loadRobotModel();
+
+	// TODO: @Kejia: change initial stage to stage after moving of the leader
+	Stage* initial_stage = new stages::CurrentState("current state");
+	t.add(std::unique_ptr<Stage>(initial_stage));
+
+	// planner used for connect
+	auto lead_pipeline = std::make_shared<solvers::PipelinePlanner>();
+	lead_pipeline->setPlannerId("RRTConnectkConfigDefault");
+
+	auto follow_pipeline = std::make_shared<solvers::PipelinePlanner>();
+	follow_pipeline->setPlannerId("RRTConnectkConfigDefault");
+
+	auto dual_pipeline = std::make_shared<solvers::PipelinePlanner>();
+	dual_pipeline->setPlannerId("RRTConnectkConfigDefault");
+
+	/****************************************************
+  ---- *                        Homing                        *
+	***************************************************/
+	{
+		auto stage = std::make_unique<stages::MoveTo>("back home", dual_pipeline);
+		stage->setGroup(dual_arm_group);
+		stage->setGoal("home");
+		t.add(std::move(stage));
+	}
+	return t;
+}
 // Subscriber callback function
 // void receiveGoals(const moveit_msgs::MTCPlanGoal::ConstPtr& msg) {
 //     // Log the received message
@@ -633,6 +669,23 @@ int main(int argc, char** argv) {
 				}
 		}
 	}
+
+	task = createTaskHome();
+	try {
+		if (task.plan())
+			// ROS_WARN("planning for clip %s succeeded", clip_id.c_str());
+			task.introspection().publishSolution(*task.solutions().front());
+
+			ROS_WARN("Executing solution trajectory");
+			moveit_msgs::MoveItErrorCodes execute_result;
+
+			execute_result = task.execute(*task.solutions().front());
+			if (execute_result.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+				ROS_ERROR_STREAM("Task execution failed and returned: " << execute_result.val);
+			}
+		} catch (const InitStageException& ex) {
+			std::cerr << "planning failed with exception" << std::endl << ex << task;
+		}
 		
     // task.printState();
 

@@ -41,24 +41,28 @@ int main(int argc, char** argv) {
 			 "path length", stages::Connect::GroupPlannerVector{ { "panda_arm", pipeline } }) };
 		connect->setCostTerm(std::make_unique<cost::PathLength>());  // This is the default for Connect, specified for
 		                                                             // demonstration purposes
+		connect->properties().set("max_distance", 1e-3);
 		alternatives->add(std::move(connect));
 	}
 	{
 		auto connect{ std::make_unique<stages::Connect>(
 			 "trajectory duration", stages::Connect::GroupPlannerVector{ { "panda_arm", pipeline } }) };
 		connect->setCostTerm(std::make_unique<cost::TrajectoryDuration>());
+		connect->properties().set("max_distance", 1e-3);
 		alternatives->add(std::move(connect));
 	}
 	{
 		auto connect{ std::make_unique<stages::Connect>(
 			 "eef motion", stages::Connect::GroupPlannerVector{ { "panda_arm", pipeline } }) };
 		connect->setCostTerm(std::make_unique<cost::LinkMotion>("panda_hand"));
+		connect->properties().set("max_distance", 1e-3);
 		alternatives->add(std::move(connect));
 	}
 	{
 		auto connect{ std::make_unique<stages::Connect>(
 			 "elbow motion", stages::Connect::GroupPlannerVector{ { "panda_arm", pipeline } }) };
 		connect->setCostTerm(std::make_unique<cost::LinkMotion>("panda_link4"));
+		connect->properties().set("max_distance", 1e-3);
 		alternatives->add(std::move(connect));
 	}
 
