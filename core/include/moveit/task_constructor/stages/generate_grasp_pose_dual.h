@@ -44,20 +44,24 @@ namespace moveit {
 namespace task_constructor {
 namespace stages {
 
+using GroupPoseDict = std::map<std::string, geometry_msgs::PoseStamped>;
+using GroupStringDict = std::map<std::string, std::string>;
+using GroupVectorDict = std::map<std::string, std::vector<double>>;
+
 class GenerateGraspPoseDual : public GeneratePose
 {
 public:
-	GenerateGraspPoseDual(const std::string& name = "generate grasp pose for follower");
+	GenerateGraspPoseDual(const std::string& name = "generate grasp pose for follower", const std::vector<std::string>& group_names = {"panda_1","panda_2"});
 
 	void init(const core::RobotModelConstPtr& robot_model) override;
 	void compute() override;
 
     void get_exploration_axis(Eigen::Vector3d& rotation_axis);
 
-	void setEndEffector(const std::string& eef) { setProperty("eef", eef); }
+	void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }
 	void setObject(const std::string& object) { setProperty("object", object); }
 	void setAngleDelta(double delta) { setProperty("angle_delta", delta); }
-	void setTarget(const std::vector<double> delta) { setProperty("target_delta", delta); }
+	void setTarget(const GroupVectorDict& target_deltas) { setProperty("target_deltas", target_deltas); }
 
 	void setPreGraspPose(const std::string& pregrasp) { properties().set("pregrasp", pregrasp); }
 	void setPreGraspPose(const moveit_msgs::RobotState& pregrasp) { properties().set("pregrasp", pregrasp); }
@@ -66,6 +70,8 @@ public:
 
 protected:
 	void onNewSolution(const SolutionBase& s) override;
+	std::vector<std::string> group_names_;
+	std::string whole_body_group_;
 };
 }  // namespace stages
 }  // namespace task_constructor
