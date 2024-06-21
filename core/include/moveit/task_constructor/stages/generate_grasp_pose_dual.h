@@ -63,10 +63,10 @@ public:
 	void setAngleDelta(double delta) { setProperty("angle_delta", delta); }
 	void setTarget(const GroupVectorDict& target_deltas) { setProperty("target_deltas", target_deltas); }
 
-	void setPreGraspPose(const std::string& pregrasp) { properties().set("pregrasp", pregrasp); }
-	void setPreGraspPose(const moveit_msgs::RobotState& pregrasp) { properties().set("pregrasp", pregrasp); }
-	void setGraspPose(const std::string& grasp) { properties().set("grasp", grasp); }
-	void setGraspPose(const moveit_msgs::RobotState& grasp) { properties().set("grasp", grasp); }
+	void setPreGraspPose(const std::map<std::string, std::string>& pregrasps) { setProperty("pregrasps", pregrasps); }
+	void setPreGraspPose(const std::map<std::string,moveit_msgs::RobotState>& pregrasps) { setProperty("pregrasps", pregrasps); }
+	void setGraspPose(const std::string& grasp) { setProperty("grasp", grasp); }
+	void setGraspPose(const moveit_msgs::RobotState& grasp) { setProperty("grasp", grasp); }
 
 protected:
 	void onNewSolution(const SolutionBase& s) override;

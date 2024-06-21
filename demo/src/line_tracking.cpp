@@ -53,18 +53,35 @@ int main(int argc, char** argv) {
     // ros::Subscriber gripper_tip_sub = nh.subscribe("gripper_tip_position", 10, gripperTipPositionCallback);
 
     // Initialize marker properties
-    Eigen::Vector3d line_marker_start;
-    Eigen::Vector3d line_marker_end;
+    // Eigen::Vector3d line_marker_start;
+    // Eigen::Vector3d line_marker_end;
+    std::vector<Eigen::Vector3d> line_starts;
+    std::vector<Eigen::Vector3d> line_ends; 
     Eigen::Vector3d gripper_tip_position;
     rviz_visual_tools::colors line_marker_color = rviz_visual_tools::colors::RED;
     rviz_visual_tools::scales line_marker_scale = rviz_visual_tools::scales::MEDIUM;
 
     // Line marker starts from a certain point
     std::vector<std::string> clip_names = {"clip7", "clip6", "clip9"};
+
     std::string clip_name = clip_names[0];
     std::map<std::string, geometry_msgs::Pose> clip_poses = psi.getObjectPoses(clip_names);
     Eigen::Isometry3d line_start_pose = poseToIsometry(clip_poses[clip_name]);
-    line_marker_start = line_start_pose.translation();
+    line_starts.push_back(line_start_pose.translation());
+
+    clip_name = clip_names[1];
+    clip_poses = psi.getObjectPoses(clip_names);
+    Eigen::Isometry3d line_ends_pose = poseToIsometry(clip_poses[clip_name]);
+    line_ends.push_back(line_ends_pose.translation());
+
+    clip_name = clip_names[1];
+    clip_poses = psi.getObjectPoses(clip_names);
+    line_start_pose = poseToIsometry(clip_poses[clip_name]);
+    // line_marker_start = line_start_pose.translation();
+    line_starts.push_back(line_start_pose.translation());
+
+    // place holder
+    line_ends.push_back(line_start_pose.translation());
 
     // // initialize
     // robot_state::RobotStatePtr current_state = move_group_interface.getCurrentState();
@@ -86,9 +103,10 @@ int main(int argc, char** argv) {
 
         // Get the global transform of a specific link with respect to the world frame
         Eigen::Isometry3d tip_pose_in_hand = Eigen::Isometry3d::Identity();
-        tip_pose_in_hand.translation().z() = 0.1034;
+        tip_pose_in_hand.translation().z() = 0.1034; // Franka TCP configuration
         const Eigen::Isometry3d& gripper_tip_pose = current_state->getGlobalLinkTransform("panda_1_hand")*tip_pose_in_hand;
-        line_marker_end = gripper_tip_pose.translation();
+        // line_marker_end = gripper_tip_pose.translation();
+        line_ends[1] = gripper_tip_pose.translation();
 
         // Extract the position components
         // gripper_tip_position = gripper_tip_pose.translation();
@@ -96,7 +114,10 @@ int main(int argc, char** argv) {
         //                                             << gripper_tip_position.y() << ", "
         //                                             << gripper_tip_position.z());
 
-        bool publishing = visual_tools->publishLine(line_marker_start,  line_marker_end, line_marker_color, line_marker_scale, 1);
+        // bool publishing = visual_tools->publishLine(line_marker_start, line_marker_end, line_marker_color, line_marker_scale, 1);
+       for (size_t i = 0; i < line_starts.size(); ++i) {
+        visual_tools->publishLine(line_starts[i], line_ends[i], line_marker_color, line_marker_scale, i); // Pass 'i' as the ID
+       }
         visual_tools->trigger();
 
         // Optionally, add a delay to control the update frequency

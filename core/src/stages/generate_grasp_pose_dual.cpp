@@ -57,16 +57,17 @@ GenerateGraspPoseDual::GenerateGraspPoseDual(const std::string& name, const std:
 	p.declare<double>("angle_delta", 0.1, "angular steps (rad)");
     p.declare<std::string>("explr_axis", "x", "axis around which rotation is performed to spawn various grasps");
 
-	p.declare<boost::any>("pregrasp", "pregrasp EE posture");
+	p.declare<boost::any>("pregrasps", "pregrasp EE posture for each group");
 	p.declare<boost::any>("grasp", "grasp EE posture");
 	p.declare<std::string>("generate_group"); // generate pose only for selected group.
 }
 
 static void applyPreGrasp(moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-                          const Property& diff_property) {
+                          const Property& diff_property, std::string group_name) {
 	try {
 		// try named joint pose
-		const std::string& diff_state_name{ boost::any_cast<std::string>(diff_property.value()) };
+		const std::map<std::string, std::string>& string_map = boost::any_cast<const std::map<std::string, std::string>&>(diff_property.value());
+		const std::string& diff_state_name{ boost::any_cast<std::string>(string_map.at(group_name)) };
 		if (!state.setToDefaultValues(jmg, diff_state_name)) {
 			throw moveit::Exception{ "unknown state '" + diff_state_name + "'" };
 		}
@@ -76,7 +77,8 @@ static void applyPreGrasp(moveit::core::RobotState& state, const moveit::core::J
 
 	try {
 		// try RobotState
-		const moveit_msgs::RobotState& robot_state_msg = boost::any_cast<moveit_msgs::RobotState>(diff_property.value());
+		const std::map<std::string, moveit_msgs::RobotState>& msg_map = boost::any_cast<const std::map<std::string, moveit_msgs::RobotState>&>(diff_property.value());
+		const moveit_msgs::RobotState& robot_state_msg = boost::any_cast<moveit_msgs::RobotState>(msg_map.at(group_name));
 		if (!robot_state_msg.is_diff)
 			throw moveit::Exception{ "RobotState message must be a diff" };
 		const auto& accepted = jmg->getJointModelNames();
@@ -113,7 +115,7 @@ bool validaEEFpose(const PropertyMap& props, const moveit::core::RobotModelConst
                   const moveit::core::JointModelGroup*& jmg, std::string* msg, std::string group_name) {
 	moveit::core::RobotState test_state{robot_model};
 	try {
-		applyPreGrasp(test_state, jmg, props.property("pregrasp"));
+		applyPreGrasp(test_state, jmg, props.property("pregrasps"), group_name);
 	} catch (const moveit::Exception& e) {
 		if (msg)
 				*msg = "invalid pregrasp for group: " + group_name;
@@ -190,7 +192,7 @@ void GenerateGraspPoseDual::compute() {
 
 		// moveit::core::RobotState& robot_state = scene->getCurrentStateNonConst();
 		try {
-			applyPreGrasp(robot_state, jmg, props.property("pregrasp"));
+			applyPreGrasp(robot_state, jmg, props.property("pregrasps"), group_name);
 		} catch (const moveit::Exception& e) {
 			spawn(InterfaceState{ scene }, SubTrajectory::failure(std::string{ "invalid pregrasp: " } + e.what()));
 			return;
@@ -208,25 +210,25 @@ void GenerateGraspPoseDual::compute() {
 			const moveit::core::JointModelGroup* jmg = scene->getRobotModel()->getEndEffector(eef);
 
 			// moveit::core::RobotState& robot_state = scene->getCurrentStateNonConst();
-			try {
-				applyPreGrasp(robot_state, jmg, props.property("pregrasp"));
-			} catch (const moveit::Exception& e) {
-				spawn(InterfaceState{ scene }, SubTrajectory::failure(std::string{ "invalid pregrasp: " } + e.what()));
-				return;
-			}
+			// try {
+			// 	applyPreGrasp(robot_state, jmg, props.property("pregrasps"));
+			// } catch (const moveit::Exception& e) {
+			// 	spawn(InterfaceState{ scene }, SubTrajectory::failure(std::string{ "invalid pregrasp: " } + e.what()));
+			// 	return;
+			// }
 
 			// set target pose
 			geometry_msgs::PoseStamped target_pose_msg;
 			// By default, target pose is set to the origin of object frame, and the position is trasnlated by a delta
 			target_pose_msg.header.frame_id = props.get<std::string>("object");
-			Eigen::Vector3d rotation_axis;
-			get_exploration_axis(rotation_axis);
-			Eigen::Isometry3d target_position(Eigen::Translation3d(target_deltas.at(group_name)[0], 
-																	target_deltas.at(group_name)[1], 
-																	target_deltas.at(group_name)[2]));
-
+		
 			if (group_name == generate_group){
 				// iterate over genrate group
+				Eigen::Vector3d rotation_axis;
+				get_exploration_axis(rotation_axis);
+				Eigen::Isometry3d target_position(Eigen::Translation3d(target_deltas.at(group_name)[0], 
+																	target_deltas.at(group_name)[1], 
+																	target_deltas.at(group_name)[2]));
 				Eigen::Isometry3d target_pose = target_position * Eigen::AngleAxisd(current_angle, rotation_axis);
 				current_angle += props.get<double>("angle_delta");
 				target_pose_msg.pose = tf2::toMsg(target_pose);
@@ -234,9 +236,13 @@ void GenerateGraspPoseDual::compute() {
 			}
 			else {
 				// other groups use default angle
-				double default_angle = 0.0;
-				Eigen::Isometry3d target_pose = target_position * Eigen::AngleAxisd(default_angle, rotation_axis);
-				target_pose_msg.pose = tf2::toMsg(target_pose);
+				target_pose_msg.pose.position.x = target_deltas.at(group_name)[0];
+				target_pose_msg.pose.position.y = target_deltas.at(group_name)[1];
+				target_pose_msg.pose.position.z = target_deltas.at(group_name)[2];
+				target_pose_msg.pose.orientation.x = 0.0;
+				target_pose_msg.pose.orientation.y = 0.9999997;
+				target_pose_msg.pose.orientation.z = 0.0;
+				target_pose_msg.pose.orientation.w = 0.0007963;
 				target_poses[group_name] = target_pose_msg;
 			}
 		}
@@ -244,7 +250,7 @@ void GenerateGraspPoseDual::compute() {
 
 		InterfaceState state(scene); // Interface state for IK solver
 		state.properties().set("target_poses", target_poses);
-		props.exposeTo(state.properties(), { "pregrasp", "grasp" });
+		props.exposeTo(state.properties(), { "pregrasps", "grasp" });
 		ROS_WARN_STREAM("Target pose: " << target_poses[generate_group].pose);
 
 		SubTrajectory trajectory;
