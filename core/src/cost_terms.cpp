@@ -317,7 +317,7 @@ double Clearance::operator()(const SubTrajectory& s, std::string& comment) const
 		comment = fmt::format(PREFIX + "average{} distance: {}", (cumulative ? " cumulative" : ""), distance);
 	}
 
-	return distance_to_cost(distance);
+	return 1000*distance_to_cost(distance);
 }
 }  // namespace cost
 }  // namespace task_constructor

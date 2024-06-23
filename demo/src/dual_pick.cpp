@@ -15,6 +15,8 @@
 #include <moveit/task_constructor/stages/move_to.h>
 #include <moveit/task_constructor/stages/fixed_cartesian_poses.h>
 #include <moveit/task_constructor/stages/fixed_cartesian_poses_multiple.h>
+#include <moveit_task_constructor_msgs/ExecuteTaskSolutionAction.h>
+#include <actionlib/client/simple_action_client.h>
 
 #include <ros/ros.h>
 #include <rosparam_shortcuts/rosparam_shortcuts.h>
@@ -210,6 +212,36 @@ moveit_msgs::CollisionObject createCubeObject(ros::Publisher& marker_pub) {
 	return object;
 }
 
+moveit_msgs::Constraints constructPlaneConstraint(const std::string& link_name, const std::string& frame_id) {
+    moveit_msgs::Constraints constraints;
+    moveit_msgs::PositionConstraint pos_constraint;
+    pos_constraint.link_name = link_name;
+    pos_constraint.header.frame_id = frame_id;
+	// target_point: relative position w.r.t. a link, e.g. the tip of the end-effector relative to its mounting point
+	pos_constraint.target_point_offset.z = 0.1034;
+	
+	// Define the constraint region (box)
+    shape_msgs::SolidPrimitive primitive;
+    primitive.type = shape_msgs::SolidPrimitive::BOX;
+    primitive.dimensions.resize(3);
+    primitive.dimensions[shape_msgs::SolidPrimitive::BOX_X] = 3.0; // Large enough to not restrict x movement
+    primitive.dimensions[shape_msgs::SolidPrimitive::BOX_Y] = 3.0; // Large enough to not restrict y movement
+    primitive.dimensions[shape_msgs::SolidPrimitive::BOX_Z] = 0.09; // Restricts z movement to 0.01
+    
+    // Position of the box
+    geometry_msgs::Pose box_pose;
+    box_pose.orientation.w = 1.0;	
+    box_pose.position.z = 0.0375; // Centered at MOVE_FREE_HEIGHT
+    
+    // Attach the box to the position constraint
+    pos_constraint.constraint_region.primitives.push_back(primitive);
+    pos_constraint.constraint_region.primitive_poses.push_back(box_pose);
+    pos_constraint.weight = 1.0; // The relative importance of this constraint
+    // stage.setGoalConstraints(constraints);
+	// stage.setPathConstraints(constraints);
+
+	return constraints;
+}
 
 void setupDemoScene() {
 	// Add table and object to planning scene
@@ -219,7 +251,7 @@ void setupDemoScene() {
 	spawnObject(psi, createObject());
 }
 
-Task createTaskRaw(std::string& goal_frame_name) {
+Task createTaskRaw(std::string& goal_frame_name, bool use_constraint) {
     std::string dual_arm_group = "dual_arm";
     std::string follow_arm_group = "panda_2"; // "left_arm"; //
     std::string lead_arm_group = "panda_1"; // "right_arm"; //
@@ -236,13 +268,13 @@ Task createTaskRaw(std::string& goal_frame_name) {
 
 	// planner used for connect
 	auto lead_pipeline = std::make_shared<solvers::PipelinePlanner>();
-	lead_pipeline->setPlannerId("RRTConnectkConfigDefault");
+	lead_pipeline->setPlannerId("RRTConnect");
 
 	auto follow_pipeline = std::make_shared<solvers::PipelinePlanner>();
-	follow_pipeline->setPlannerId("RRTConnectkConfigDefault");
+	follow_pipeline->setPlannerId("RRTConnect");
 
 	auto dual_pipeline = std::make_shared<solvers::PipelinePlanner>();
-	dual_pipeline->setPlannerId("RRTConnectkConfigDefault");
+	dual_pipeline->setPlannerId("RRTConnect");
 
 	// // create Cartesian interpolation "planner" to be used in various stages
 	// auto cartesian_interpolation = std::make_shared<solvers::CartesianPath>();
@@ -297,6 +329,11 @@ Task createTaskRaw(std::string& goal_frame_name) {
 		auto connect = std::make_unique<stages::Connect>("connect", planners);
 		connect->properties().configureInitFrom(Stage::PARENT);
 		connect->properties().set("max_distance", 1e-3); // max allowable distance between end and goal position
+
+		if (use_constraint) {
+			moveit_msgs::Constraints leader_ee_constraint = constructPlaneConstraint("panda_1_hand", goal_frame_name);
+			connect->setPathConstraints(leader_ee_constraint);
+		}
 		
 		grasp->insert(std::move(connect));
 		// t.add(std::move(connect));
@@ -417,7 +454,7 @@ Task createTaskRaw(std::string& goal_frame_name) {
 		ik_wrapper->setIKFrame(ik_frames, ik_links);
 
 		auto cl_cost{ std::make_unique<cost::Clearance>() };
-		cl_cost->cumulative = true;  // sum up pairwise distances between the robot to all objects?
+		cl_cost->cumulative = false;  // sum up pairwise distances between the robot to all objects?
 		cl_cost->with_world = false;  // consider distance of the robot to world objects?
 		ik_wrapper->setCostTerm(std::move(cl_cost));
 			
@@ -639,13 +676,13 @@ Task createTaskHome() {
 
 	// planner used for connect
 	auto lead_pipeline = std::make_shared<solvers::PipelinePlanner>();
-	lead_pipeline->setPlannerId("RRTConnectkConfigDefault");
+	lead_pipeline->setPlannerId("RRTConnect");
 
 	auto follow_pipeline = std::make_shared<solvers::PipelinePlanner>();
-	follow_pipeline->setPlannerId("RRTConnectkConfigDefault");
+	follow_pipeline->setPlannerId("RRTConnect");
 
 	auto dual_pipeline = std::make_shared<solvers::PipelinePlanner>();
-	dual_pipeline->setPlannerId("RRTConnectkConfigDefault");
+	dual_pipeline->setPlannerId("RRTConnectS");
 
 	/****************************************************
   ---- *                        Homing                        *
@@ -701,6 +738,8 @@ int main(int argc, char** argv) {
 	std::vector<std::string> clip_names = {"clip7", "clip6", "clip9"}; //, "clip7", "clip6", "clip9"
 	std::map<std::string, geometry_msgs::Pose> clip_poses = psi.getObjectPoses(clip_names);
 
+	bool use_constraint;
+
 	for (const auto& clip_id : clip_names) {
         const auto& it = clip_poses.find(clip_id); // Find pose for the clip name
         if (it != clip_poses.end()) {
@@ -716,8 +755,13 @@ int main(int argc, char** argv) {
 
 			// motion plan to the clip
 			std::string goal_frame_name = clip_id;
+
+			use_constraint = true;
+			if (clip_id == "clip7"){
+				use_constraint = false;
+			}
 			
-			task = createTaskRaw(goal_frame_name);
+			task = createTaskRaw(goal_frame_name, use_constraint);
 			try {
 				if (task.plan())
 					// ROS_WARN("planning for clip %s succeeded", clip_id.c_str());
@@ -726,14 +770,14 @@ int main(int argc, char** argv) {
 					ROS_WARN("Executing solution trajectory");
 					moveit_msgs::MoveItErrorCodes execute_result;
 
-					execute_result = task.execute(*task.solutions().front());
-					// // If you want to inspect the goal message, use this instead:
-					// actionlib::SimpleActionClient<moveit_task_constructor_msgs::ExecuteTaskSolutionAction>
-					// execute("execute_task_solution", true); execute.waitForServer();
-					// moveit_task_constructor_msgs::ExecuteTaskSolutionGoal execute_goal;
-					// task_->solutions().front()->toMsg(execute_goal.solution);
-					// execute.sendGoalAndWait(execute_goal);
-					// execute_result = execute.getResult()->error_code;
+					// execute_result = task.execute(*task.solutions().front());
+					// If you want to inspect the goal message, use this instead:
+					actionlib::SimpleActionClient<moveit_task_constructor_msgs::ExecuteTaskSolutionAction>
+					execute("execute_task_solution", true); execute.waitForServer();
+					moveit_task_constructor_msgs::ExecuteTaskSolutionGoal execute_goal;
+					task.solutions().front()->toMsg(execute_goal.solution);
+					execute.sendGoalAndWait(execute_goal);
+					execute_result = execute.getResult()->error_code;
 
 					if (execute_result.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
 						ROS_ERROR_STREAM("Task execution failed and returned: " << execute_result.val);
