@@ -341,6 +341,17 @@ Stage* ContainerBase::findChild(const std::string& name) const {
 	return nullptr;
 }
 
+void ContainerBase::getAllChildren() const {
+	for (const Stage::pointer& child : pimpl()->children()){
+		std::string name = child->name();
+		std::cout << "Child: "<< name << std::endl;
+
+		if (auto child_container = dynamic_cast<const ContainerBase*>(child.get())) {
+            child_container->getAllChildren();
+        }
+	}
+}	
+
 Stage* ContainerBase::operator[](int index) const {
 	auto impl = pimpl();
 	auto it = impl->childByIndex(index, false);

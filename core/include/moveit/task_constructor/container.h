@@ -53,6 +53,7 @@ public:
 
 	size_t numChildren() const;
 	Stage* findChild(const std::string& name) const;
+	void getAllChildren() const;
 	Stage* operator[](int index) const;
 
 	/** Callback function type used by traverse functions
