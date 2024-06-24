@@ -296,7 +296,7 @@ Task createTaskRaw(std::string& goal_frame_name, bool use_constraint) {
 	Stage* move_stage_ptr = nullptr;
 	Stage* pre_move_stage_ptr = nullptr;
 	{	
-		auto grasp = std::make_unique<SerialContainer>("pick object");
+		auto grasp = std::make_unique<SerialContainer>("pick_object");
 		/****************************************************
   ---- *               Close leader hand                     *
 		***************************************************/
@@ -735,7 +735,7 @@ int main(int argc, char** argv) {
 	moveit::planning_interface::PlanningSceneInterface psi;
 	// spawnObject(psi, createCubeObject(marker_pub));
 	
-	std::vector<std::string> clip_names = {"clip7", "clip6", "clip9"}; //, "clip7", "clip6", "clip9"
+	std::vector<std::string> clip_names = {"clip7"}; //, "clip7", "clip6", "clip9"
 	std::map<std::string, geometry_msgs::Pose> clip_poses = psi.getObjectPoses(clip_names);
 
 	bool use_constraint;
@@ -765,17 +765,23 @@ int main(int argc, char** argv) {
 			try {
 				if (task.plan())
 					// ROS_WARN("planning for clip %s succeeded", clip_id.c_str());
-					task.introspection().publishSolution(*task.solutions().front());
+					// task.introspection().publishSolution(*task.solutions().front());
 
 					ROS_WARN("Executing solution trajectory");
 					moveit_msgs::MoveItErrorCodes execute_result;
+
+					task.stages()->getAllChildren();
 
 					// execute_result = task.execute(*task.solutions().front());
 					// If you want to inspect the goal message, use this instead:
 					actionlib::SimpleActionClient<moveit_task_constructor_msgs::ExecuteTaskSolutionAction>
 					execute("execute_task_solution", true); execute.waitForServer();
 					moveit_task_constructor_msgs::ExecuteTaskSolutionGoal execute_goal;
-					task.solutions().front()->toMsg(execute_goal.solution);
+					task.solutions().front()->toMsg(execute_goal.solution, &task.introspection());					
+					// ROS_WARN_STREAM("Executing subtrajectory: " << execute_goal.solution.sub_trajectory);
+					for(const auto& sub_traj : execute_goal.solution.sub_trajectory) {
+						ROS_WARN_STREAM("Executing subtrajectory: " << "id: " << sub_traj.info.id << " " << "stage_id: " << sub_traj.info.stage_id);
+					}
 					execute.sendGoalAndWait(execute_goal);
 					execute_result = execute.getResult()->error_code;
 
@@ -807,7 +813,7 @@ int main(int argc, char** argv) {
 		
     // task.printState();
 
-    // Stage* generateGraspPoseStage = task.stages()->findChild("pick/grasp/compute ik");
+    // Stage* generateGraspPoseStage = task.stages()->findChild("pick_object/connect");
     
     // if (generateGraspPoseStage) {
     // // Proceed with accessing solutions
