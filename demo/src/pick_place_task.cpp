@@ -506,6 +506,9 @@ bool PickPlaceTask::execute() {
 	execute("execute_task_solution", true); execute.waitForServer();
 	moveit_task_constructor_msgs::ExecuteTaskSolutionGoal execute_goal;
 	task_->solutions().front()->toMsg(execute_goal.solution);
+	for(const auto& sub_traj : execute_goal.solution.sub_trajectory) {
+		ROS_WARN_STREAM("Executing subtrajectory: " << "id: " << sub_traj.info.id << " " << "stage_id: " << sub_traj.info.stage_id);
+	}
 	execute.sendGoalAndWait(execute_goal);
 	execute_result = execute.getResult()->error_code;
 

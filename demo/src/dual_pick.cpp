@@ -441,7 +441,7 @@ Task createTaskRaw(std::string& goal_frame_name, bool use_constraint) {
 		grasp_generator->setMonitoredStage(pre_move_stage_ptr);
 		grasp_generator->properties().set("generate_group", follow_arm_group);
 
-		auto ik_wrapper = std::make_unique<stages::ComputeIKMultiple>("move IK", std::move(grasp_generator), ik_groups, dual_arm_group);
+		auto ik_wrapper = std::make_unique<stages::ComputeIKMultiple>("move IK dual", std::move(grasp_generator), ik_groups, dual_arm_group);
 		ik_wrapper->setSubGroups(ik_groups);
 		ik_wrapper->setGroup(dual_arm_group);
 		ik_wrapper->setEndEffector(ik_endeffectors);
@@ -725,7 +725,7 @@ int main(int argc, char** argv) {
 
 	ros::init(argc, argv, "mtc_tutorial");
 	ros::NodeHandle nh;
-		ros::Publisher marker_pub = nh.advertise<visualization_msgs::MarkerArray>("interactive_robot_marray", 10);
+	ros::Publisher marker_pub = nh.advertise<visualization_msgs::MarkerArray>("interactive_robot_marray", 10);
 	// run an asynchronous spinner to communicate with the move_group node and rviz
 	ros::AsyncSpinner spinner(1);
 	spinner.start();

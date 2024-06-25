@@ -39,12 +39,15 @@
 #pragma once
 
 #include "stages/compute_ik.h"
+#include "stages/compute_ik_multiple.h"
 #include "stages/connect.h"
 #include "stages/current_state.h"
 #include "stages/fix_collision_objects.h"
 #include "stages/fixed_cartesian_poses.h"
 #include "stages/fixed_state.h"
 #include "stages/generate_grasp_pose.h"
+#include "stages/generate_grasp_pose_follower.h"
+#include "stages/generate_grasp_pose_dual.h"
 #include "stages/generate_place_pose.h"
 #include "stages/generate_pose.h"
 #include "stages/modify_planning_scene.h"
