@@ -176,6 +176,11 @@ Introspection& Task::introspection() {
 	return *impl->introspection_;
 }
 
+Introspection* Task::getIntrospection() {
+	enableIntrospection(true);
+    return pimpl()->introspection_.get();
+}
+
 Task::TaskCallbackList::const_iterator Task::addTaskCallback(TaskCallback&& cb) {
 	auto impl = pimpl();
 	impl->task_cbs_.emplace_back(std::move(cb));

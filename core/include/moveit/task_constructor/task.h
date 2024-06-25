@@ -101,6 +101,7 @@ public:
 	/// enable introspection publishing for use with rviz
 	void enableIntrospection(bool enable = true);
 	Introspection& introspection();
+	Introspection* getIntrospection();
 
 	using TaskCallback = std::function<void(const Task& t)>;
 	using TaskCallbackList = std::list<TaskCallback>;

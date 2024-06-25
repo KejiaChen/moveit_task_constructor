@@ -471,16 +471,16 @@ void export_core(pybind11::module& m) {
 	        "publish",
 	        [](Task& self, const SolutionBasePtr& solution) { self.introspection().publishSolution(*solution); },
 	        "solution"_a, "Publish the given solution to the ROS topic ``solution``")
-	    .def_static(
+	    .def(
 	        "execute",
-	        [](const SolutionBasePtr& solution) {
+	        [](Task& self, const SolutionBasePtr& solution) {
 		        using namespace moveit::planning_interface;
 		        PlanningSceneInterface psi;
 		        MoveGroupInterface mgi(solution->start()->scene()->getRobotModel()->getJointModelGroupNames()[0]);
 
 		        MoveGroupInterface::Plan plan;
 		        moveit_task_constructor_msgs::Solution serialized;
-		        solution->toMsg(serialized);
+		        solution->toMsg(serialized, self.getIntrospection());
 
 		        for (const moveit_task_constructor_msgs::SubTrajectory& traj : serialized.sub_trajectory) {
 			        if (!traj.trajectory.joint_trajectory.points.empty()) {
