@@ -197,6 +197,12 @@ bool Introspection::getSolution(moveit_task_constructor_msgs::GetSolution::Reque
 }
 
 uint32_t Introspection::stageId(const Stage* const s) {
+	if (impl->stage_to_id_map_.find(s->pimpl()) == impl->stage_to_id_map_.end()) {
+		ROS_WARN_STREAM_NAMED(LOGGER, "Adding id for stage: " << s->name());
+		ROS_WARN_STREAM_NAMED(LOGGER, "map size: " << impl->stage_to_id_map_.size());
+    // s->pimpl() is not in the map
+	}
+	ROS_WARN_STREAM_NAMED(LOGGER, "Getting id for stage " << s->name() << ": "<< impl->stage_to_id_map_.insert(std::make_pair(s->pimpl(), impl->stage_to_id_map_.size())).first->second);
 	return impl->stage_to_id_map_.insert(std::make_pair(s->pimpl(), impl->stage_to_id_map_.size())).first->second;
 }
 uint32_t Introspection::stageId(const Stage* const s) const {
@@ -207,6 +213,8 @@ uint32_t Introspection::stageId(const Stage* const s) const {
 }
 
 uint32_t Introspection::solutionId(const SolutionBase& s) {
+// 	ROS_WARN_STREAM_NAMED(LOGGER, "unregistered solution: " << s.creator()->name());
+// 	ROS_WARN_STREAM_NAMED(LOGGER, "map size: " << impl->id_solution_bimap_.size());
 	auto result = impl->id_solution_bimap_.left.insert(std::make_pair(1 + impl->id_solution_bimap_.size(), &s));
 	if (result.second)  // new entry
 		ROS_DEBUG_STREAM_NAMED(LOGGER, "new solution #" << result.first->first << " (" << s.creator()->name()

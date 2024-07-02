@@ -111,6 +111,7 @@ public:
 
 PYBIND11_SMART_HOLDER_TYPE_CASTERS(moveit::task_constructor::solvers::PlannerInterface)
 
+PYBIND11_SMART_HOLDER_TYPE_CASTERS(moveit::task_constructor::Introspection)
 PYBIND11_SMART_HOLDER_TYPE_CASTERS(moveit::task_constructor::SolutionBase)
 PYBIND11_SMART_HOLDER_TYPE_CASTERS(moveit::task_constructor::SubTrajectory)
 PYBIND11_SMART_HOLDER_TYPE_CASTERS(ordered<moveit::task_constructor::SolutionBaseConstPtr>)

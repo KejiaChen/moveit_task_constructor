@@ -23,17 +23,11 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import PoseStamped, Pose, Vector3
 # from moveit_msgs.msg import MTCPlanGoal
 from moveit.task_constructor import core, stages
+import threading
+import moveit_task_constructor_msgs.msg
+from moveit_msgs.srv import GetMiosPlan
 
 from py_binding_tools import roscpp_init
-
-# in clip frame
-clip_size = [0.04, 0.04, 0.06]
-hold_x_offset = 0.03
-leader_pre_clip = [-(clip_size[0]/2+hold_x_offset), -clip_size[1]/2, clip_size[2]/2]
-follower_pre_clip = [clip_size[0]/2+hold_x_offset, -clip_size[1]/2, clip_size[2]/2]
-leader_post_clip = [-0.05, 0, 0]  # [0.575, -0.081, 1.128]  # [0.552, 0.069, 1.128]
-follower_post_clip = [0.05, 0, 0]  # [0.552, 0.069, 1.128]  # [0.575, -0.081, 1.128]
-
 
 # Distance from the eef mount to the palm of end effector [x, y, z, r, p, y]
 # copied from https://github.com/ros-planning/moveit_grasps/blob/melodic-devel/config_robot/panda_grasp_data.yaml
@@ -117,31 +111,70 @@ class TaskPlanner():
         
         # maker publisher
         self.marker_pub = rospy.Publisher('interactive_robot_markers', Marker, queue_size=1)
-
-        '''task constructor configuration'''
+        
+        '''configuration'''
         # groups
         self.dual_arm_group = "dual_arm"
         self.follow_arm_group = "panda_2"
         self.lead_arm_group = "panda_1"
         self.follow_hand_group = "hand_2"
         self.lead_hand_group = "hand_1"
-        
-        # # planning pipeline
-        # self.cartesian_pipeline = core.CartesianPath()
-        # self.jointspace_pipeline = core.JointInterpolationPlanner()
-        
-        # self.lead_pipeline = core.PipelinePlanner()
-        # self.lead_pipeline.planner = "RRTConnect"
-        
-        # self.follow_pipeline = core.PipelinePlanner()
-        # self.follow_pipeline.planner = "RRTConnect"
-        
-        # self.dual_pipeline = core.PipelinePlanner()
-        # self.dual_pipeline.planner = "RRTConnect"
+        self.follow_end_effector_link = "panda_2_link8"
+        self.lead_end_effector_link = "panda_1_link8"
         
         # pose and parameters
         self.hand_open_pose_ = "open"
         self.hand_close_pose_ = "close"
+        
+        '''move groups initialization'''
+        self.follow_arm_move_group = moveit_commander.MoveGroupCommander(self.follow_arm_group)
+        self.follow_hand_move_group = moveit_commander.MoveGroupCommander(self.follow_hand_group)
+        self.lead_arm_move_group = moveit_commander.MoveGroupCommander(self.lead_arm_group)
+        self.lead_hand_move_group = moveit_commander.MoveGroupCommander(self.lead_hand_group)
+        
+        self.dual_arm_move_group = moveit_commander.MoveGroupCommander(self.dual_arm_group)
+
+        '''exchange with mios'''
+        # publisher to mios
+        self.publisher = rospy.Publisher('moveit2mios_chatter', std_msgs.msg.Bool)
+        # rospy.init_node('moveit_talker', anonymous=True)
+        
+        # Lock for synchronizing access to move group by two subscribers
+        self.lock = threading.Lock()
+        self.is_planning = False
+        self.real_world_joint_positions = None
+        self.keep_running = True
+        
+        self.execution_thread = threading.Thread(target=self.joint_status_callback_execution)
+        self.execution_thread.start()
+        
+        self.leader_traj_host = '10.157.174.87'
+        self.leader_traj_port = 12345
+        self.follower_traj_host = '10.157.174.101'
+        self.follower_traj_port = 12345
+        
+        '''trajectory client'''
+        self.client_socket = socket.socket()
+    
+    def test_dual_joint_goal(self, follow_joint_goal:list, lead_joint_goal:list):
+        self.dual_arm_move_group.set_joint_value_target(follow_joint_goal+lead_joint_goal)
+        return self.dual_arm_move_group.plan()
+    
+    def test_dual_pose_goal(self):
+        lead_pose_goal =self.lead_arm_move_group.get_current_pose(self.lead_end_effector_link)
+        lead_pose_goal.pose.position.z -= 0.15
+        lead_pose_goal.pose.position.x += 0.15
+
+        follow_pose_goal = self.follow_arm_move_group.get_current_pose(self.follow_end_effector_link)
+        follow_pose_goal.pose.position.z -= 0.15
+        follow_pose_goal.pose.position.x -= 0.15
+        
+        self.dual_arm_move_group.set_start_state_to_current_state()
+        self.dual_arm_move_group.set_pose_target(follow_pose_goal, end_effector_link=self.follow_end_effector_link)
+        self.dual_arm_move_group.set_pose_target(lead_pose_goal, end_effector_link=self.lead_end_effector_link)
+        
+        self.dual_arm_move_group.plan()
+        self.dual_arm_move_group.go(wait=True)
     
     def setup_planning_piplines(self):
         # planning pipeline
@@ -156,8 +189,150 @@ class TaskPlanner():
         
         self.dual_pipeline = core.PipelinePlanner()
         self.dual_pipeline.planner = "RRTConnect"
+    
+    def subscribe(self):
+        # subscriber to real-world joint states
+        self.joint_status_subscriber = rospy.Subscriber("mios_combined_joint_positions", moveit_msgs.msg.FromMiosJointStatus, self.joint_status_callback)
+        rospy.loginfo("start subscribe to joint state")
         
-    def create_task(self, goal_frame_name, use_constraint=False):
+        # subscriber to planning request
+        # self.plan_request_subscriber = rospy.Subscriber("mios2moveit_chatter", moveit_msgs.msg.FromMios, self.plan_callback)
+        # rospy.loginfo("start subscribe to planning request")
+        
+        # servoce to planning request
+        self.plan_request_server = rospy.Service('mios_plan_request_service', GetMiosPlan, self.plan_callback)
+        rospy.loginfo("start server to handle planning request from mios")
+        
+    def joint_status_callback_execution(self):
+        '''callback function to synchronize move group joint states with real world'''
+        # rospy.loginfo("synchronization")
+        while self.keep_running and not rospy.is_shutdown():
+            if self.real_world_joint_positions and not self.is_planning:
+                with self.lock:
+                    # self.dual_arm_move_group.set_joint_value_target(lead_current_joint+follow_current_joint)
+                    # print("joint states", self.real_world_joint_positions)
+                    self.dual_arm_move_group.go(self.real_world_joint_positions, wait=True)
+                    self.real_world_joint_positions = None
+        
+    def joint_status_callback(self, data):
+        '''callback function to update joint states from real world'''
+        with self.lock:
+            lead_current_joint = data.robot1_current_joint
+            follow_current_joint = data.robot2_current_joint
+            self.real_world_joint_positions = lead_current_joint + follow_current_joint
+    
+    def _copy_solution(self, solution):
+        copy_solution = moveit_task_constructor_msgs.msg.Solution()
+        copy_solution.start_scene = solution.start_scene
+        copy_solution.sub_solution = solution.sub_solution
+        copy_solution.sub_trajectory = solution.sub_trajectory
+        copy_solution.task_id = solution.task_id
+        return copy_solution
+    
+    def plan_callback(self, data):
+        with self.lock:
+            rospy.loginfo(rospy.get_caller_id() + " I heard %s", data)
+            self.is_planning = True
+            
+            leader_pre_clip_pose = data.mios_plan_request.leader_goal_in_clip
+            leader_pre_clip_vec = [leader_pre_clip_pose.position.x, leader_pre_clip_pose.position.y, leader_pre_clip_pose.position.z]
+            follower_pre_clip_pose = data.mios_plan_request.follower_goal_in_clip
+            follower_pre_clip_vec = [follower_pre_clip_pose.position.x, follower_pre_clip_pose.position.y, follower_pre_clip_pose.position.z]
+            goal_frame = f"clip{data.mios_plan_request.clip_id}"
+            
+            msg_to_mios = moveit_msgs.msg.MiosPlanResponse()
+             
+            '''Synchronize '''
+            # self.synchronize(lead_current_joint, follow_current_joint, fixed_clip)
+            # lead_current_pose = self.lead_arm_move_group.get_current_pose().pose
+            # rotation_matrix_r1 = msg_orientation_to_matrix(lead_current_pose.orientation)
+            
+            '''Plan'''
+            try: 
+                task = self.create_task(goal_frame, leader_pre_clip_vec, follower_pre_clip_vec)
+                if task.plan():
+                    rospy.logwarn("Executing solution trajectory")
+                    # task.publish(task.solutions[0])
+                    
+                    solution = task.solutions[0]
+                    execute_result = task.execute(solution)
+                        
+                    # execute_goal = moveit_task_constructor_msgs.Solution 
+                    execute_goal = task.solutions[0].toMsg(task.getIntrospection())
+                    msg_to_mios.success = True
+                    traj_collection = execute_goal.sub_trajectory
+                    
+                    for traj_msg in traj_collection:
+                        traj_list = []
+                        solution_id = traj_msg.info.stage_id
+                        joint_names = traj_msg.trajectory.joint_trajectory.joint_names
+                        joint_trajectory = traj_msg.trajectory.joint_trajectory.points
+                        print(str(solution_id) + ": ")
+                        print(' '.join('%s' % x for x in joint_names))
+                        if joint_names:
+                            if "finger_joint" in joint_names[0]:
+                                continue
+                            else:
+                                real_world_file_path = os.path.join(os.path.dirname(__file__), 'saved_trajectories', 'real_world_traj_task_'+str(solution_id)+'.txt')
+                                # with open(real_world_file_path, 'w+') as f:
+                                for point in joint_trajectory:
+                                    traj_list.append(list(point.positions))
+                                #         f.write(' '.join('%s' % x for x in point.positions))
+                                #         # f.write(' ')
+                                #         # f.write(' '.join('%s' % x for x in point.velocities))
+                                #         f.write(' \n')
+                                
+                                # smoothing
+                                traj = np.array(traj_list)
+                                smooth_traj = rtb.tools.mstraj(traj, dt=0.001, tacc=0, qdmax=0.5)
+                                
+                                '''Send trajectories to robots'''
+                                client_socket = socket.socket()  # instantiate
+                                # Skip finger joints
+                                
+                                # Send arm trajectories to robots
+                                if "panda_1" in joint_names[0]:
+                                    response_robot_id = 1
+                                    server_host = self.leader_traj_host
+                                    server_port = self.leader_traj_port
+                                elif "panda_2" in joint_names[0]:
+                                    response_robot_id = 2
+                                    server_host = self.follower_traj_host
+                                    server_port = self.follower_traj_port
+                                
+                                if msg_to_mios.robot_id:
+                                    msg_to_mios.robot_id.append(response_robot_id)
+                                else:
+                                    msg_to_mios.robot_id = [response_robot_id]
+                                if msg_to_mios.traj_id:
+                                    msg_to_mios.traj_id.append(solution_id)
+                                else:
+                                    msg_to_mios.traj_id = [solution_id]
+                                
+                                client_socket.connect((server_host, server_port))
+                                # send the write or read command
+                                command = "write"
+                                client_socket.send(f"{command}".encode())
+                                # send the name of the file
+                                smooth_file_path = os.path.join(os.path.dirname(__file__), 'saved_trajectories', 'smooth_real_world_traj_'+str(solution_id)+'.txt')
+                                smooth_file_name = os.path.basename(smooth_file_path)
+                                rospy.loginfo("file name %s", smooth_file_name)
+                                client_socket.send(f"{os.path.basename(smooth_file_path)}".encode())
+                                rospy.loginfo("send file name to mios at %s", server_host)
+                                # send the trajectory
+                                joint_traj_data = pickle.dumps(smooth_traj.q)
+                                client_socket.sendall(joint_traj_data)
+                                rospy.loginfo("send smooth trajectory to mios at %s", server_host)
+                                # send the stopping signal
+                                # client_socket.send(f"end".encode())
+                                client_socket.close()
+                            
+                    
+            except Exception as ex:
+                rospy.logerr("planning failed with exception\n%s%s", ex, task)
+        return msg_to_mios
+    
+    def create_task(self, goal_frame_name,  leader_pre_clip, follower_pre_clip, use_constraint=False):
         t = core.Task()
         t.loadRobotModel()
         
@@ -240,6 +415,14 @@ class TaskPlanner():
         ik_wrapper.max_ik_solutions = 100
         ik_wrapper.min_solution_distance = 1.0
         ik_wrapper.setIKFrame(ik_frames)
+        
+        # set cost
+        cost_cumulative = False
+        cost_with_world = False
+        cost_group_property = "group"
+        cost_mode = core.TrajectoryCostTerm.Mode.AUTO
+        cl_cost = core.Clearance(cost_with_world, cost_cumulative,cost_group_property, cost_mode)
+        ik_wrapper.setCostTerm(cl_cost)
         
         grasp.insert(ik_wrapper)
         
@@ -347,7 +530,6 @@ if __name__ == '__main__':
     ## First initialize `moveit_commander`_ and a `rospy`_ node:
     # moveit_commander.roscpp_initialize(sys.argv)
     rospy.init_node("mtc_task_planner", anonymous=True)
-    
         
     # clear previous planning
     rospy.wait_for_service('/clear_octomap') #this will stop your code until the clear octomap service starts running
@@ -357,10 +539,23 @@ if __name__ == '__main__':
     robot1_current_joint = [-1.02680829,  0.44764564,  0.18002864, -2.30666668, -0.24687706,  2.77595507, 1.41033604]
     robot2_current_joint = [-0.03919738,  0.16151273, -0.21564032, -2.65617219,  0.05404735,  2.8080896, 1.55379734]
     
-    task_planner = TaskPlanner(clip_information=args.clip_file, clip_path=[7, 6, 9])
+    # in clip frame
+    clip_size = [0.04, 0.04, 0.06]
+    hold_x_offset = 0.03
+    leader_pre_clip = [-(clip_size[0]/2+hold_x_offset), -clip_size[1]/2, clip_size[2]/2]
+    follower_pre_clip = [clip_size[0]/2+hold_x_offset, -clip_size[1]/2, clip_size[2]/2]
+    leader_post_clip = [-0.05, 0, 0]  # [0.575, -0.081, 1.128]  # [0.552, 0.069, 1.128]
+    follower_post_clip = [0.05, 0, 0]  # [0.552, 0.069, 1.128]  # [0.575, -0.081, 1.128]
+    
+    task_planner = TaskPlanner(clip_information=args.clip_file, clip_path=[7]) #7, 6, 9
+    
+    '''Mios Plan Service'''
+    # task_planner.subscribe()
+    
+    '''MTC Direct Test'''
     for clip_id in task_planner.clip_togo:
         goal_frame = f"clip{clip_id}"
-        task = task_planner.create_task(goal_frame)
+        task = task_planner.create_task(goal_frame, leader_pre_clip, follower_pre_clip)
         
         # try:
         #     if task.plan():

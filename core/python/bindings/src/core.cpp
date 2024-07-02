@@ -39,6 +39,7 @@
 #include <moveit/python/task_constructor/properties.h>
 #include <moveit/task_constructor/container_p.h>
 #include <moveit/task_constructor/task.h>
+#include <moveit/task_constructor/task_p.h>
 
 #include <moveit/planning_scene/planning_scene.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
@@ -95,6 +96,11 @@ void export_core(pybind11::module& m) {
 		}
 	});
 
+	py::classh<Introspection>(m, "Introspection")
+    .def(py::init<const TaskPrivate*>())
+    // Add bindings for Introspection methods here
+    ;
+
 	py::classh<SolutionBase>(m, "Solution", "Abstract base class for solutions of a stage")
 	    .def_property("cost", &SolutionBase::cost, &SolutionBase::setCost, "float: Cost associated with the solution")
 	    .def_property("comment", &SolutionBase::comment, &SolutionBase::setComment,
@@ -109,9 +115,9 @@ void export_core(pybind11::module& m) {
 	        ":visualization_msgs:`Marker`: Markers to visualize important aspects of the trajectory (read-only)")
 	    .def(
 	        "toMsg",
-	        [](const SolutionBase& self) {
+	        [](const SolutionBase& self, Introspection* introspection) {
 		        moveit_task_constructor_msgs::Solution msg;
-		        self.toMsg(msg);
+		        self.toMsg(msg, introspection);
 		        return msg;
 	        },
 	        "Convert to the ROS message ``Solution``");
@@ -494,7 +500,8 @@ void export_core(pybind11::module& m) {
 		        }
 		        ROS_INFO("Executed successfully");
 	        },
-	        "solution"_a, "Send given solution to ``move_group`` node for execution");
+	        "solution"_a, "Send given solution to ``move_group`` node for execution")
+		.def("getIntrospection", &Task::getIntrospection, "Enable introspection and return the introspection pointer");
 }
 }  // namespace python
 }  // namespace moveit

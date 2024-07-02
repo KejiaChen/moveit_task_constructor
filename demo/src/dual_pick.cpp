@@ -774,8 +774,8 @@ int main(int argc, char** argv) {
 
 					// execute_result = task.execute(*task.solutions().front());
 					// If you want to inspect the goal message, use this instead:
-					actionlib::SimpleActionClient<moveit_task_constructor_msgs::ExecuteTaskSolutionAction>
-					execute("execute_task_solution", true); execute.waitForServer();
+					actionlib::SimpleActionClient<moveit_task_constructor_msgs::ExecuteTaskSolutionAction>execute("execute_task_solution", true); 
+					execute.waitForServer();
 					moveit_task_constructor_msgs::ExecuteTaskSolutionGoal execute_goal;
 					task.solutions().front()->toMsg(execute_goal.solution, &task.introspection());					
 					// ROS_WARN_STREAM("Executing subtrajectory: " << execute_goal.solution.sub_trajectory);
