@@ -45,6 +45,9 @@
 #include <Eigen/Geometry>
 #include <tf2_eigen/tf2_eigen.h>
 
+#include <tf2_ros/transform_listener.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+
 namespace moveit {
 namespace task_constructor {
 namespace stages {
@@ -52,7 +55,7 @@ namespace stages {
 GenerateGraspPoseDual::GenerateGraspPoseDual(const std::string& name, const std::vector<std::string>& group_names) : GeneratePose(name), group_names_(std::move(group_names)){
 	auto& p = properties();
 	p.declare<GroupStringDict>("eefs", "vector of names of end-effector group");
-	p.declare<std::string>("object");
+	p.declare<GroupStringDict>("objects");
     p.declare<GroupVectorDict>("target_deltas", "relative position of target pose in object frame"); //{1, 0, 0},
 	p.declare<double>("angle_delta", 0.1, "angular steps (rad)");
     p.declare<std::string>("explr_axis", "x", "axis around which rotation is performed to spawn various grasps");
@@ -60,6 +63,7 @@ GenerateGraspPoseDual::GenerateGraspPoseDual(const std::string& name, const std:
 	p.declare<boost::any>("pregrasps", "pregrasp EE posture for each group");
 	p.declare<boost::any>("grasp", "grasp EE posture");
 	p.declare<std::string>("generate_group"); // generate pose only for selected group.
+	p.declare<std::string>("planning_frame"); // planning frame, by default the clip frame
 }
 
 static void applyPreGrasp(moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
@@ -138,8 +142,8 @@ void GenerateGraspPoseDual::init(const core::RobotModelConstPtr& robot_model) {
 	if (props.get<double>("angle_delta") == 0.)
 		errors.push_back(*this, "angle_delta must be non-zero");
 
-	// check availability of object
-	props.get<std::string>("object");
+	// check availability of objects
+	props.get<GroupStringDict>("objects");
 
 	const moveit::core::JointModelGroup* eef_jmg = nullptr;
 	const moveit::core::JointModelGroup* jmg = nullptr;
@@ -162,11 +166,12 @@ void GenerateGraspPoseDual::onNewSolution(const SolutionBase& s) {
 	planning_scene::PlanningSceneConstPtr scene = s.end()->scene();
 
 	const auto& props = properties();
-	const std::string& object = props.get<std::string>("object");
-	if (!scene->knowsFrameTransform(object)) {
-		const std::string msg = "object '" + object + "' not in scene";
-		spawn(InterfaceState{ scene }, SubTrajectory::failure(msg));
-		return;
+	for (auto& object : props.get<GroupStringDict>("objects")) {
+		if (!scene->knowsFrameTransform(object.second)) {
+			const std::string msg = "object '" + object.second + "' not in scene";
+			spawn(InterfaceState{ scene }, SubTrajectory::failure(msg));
+			return;
+		}
 	}
 
 	upstream_solutions_.push(&s);
@@ -218,33 +223,59 @@ void GenerateGraspPoseDual::compute() {
 			// }
 
 			// set target pose
-			geometry_msgs::PoseStamped target_pose_msg;
+			geometry_msgs::PoseStamped raw_pose_msg;
 			// By default, target pose is set to the origin of object frame, and the position is trasnlated by a delta
-			target_pose_msg.header.frame_id = props.get<std::string>("object");
-		
+			raw_pose_msg.header.frame_id = props.get<GroupStringDict>("objects").at(group_name);
+
+			// default goal pose
+			raw_pose_msg.pose.position.x = target_deltas.at(group_name)[0];
+			raw_pose_msg.pose.position.y = target_deltas.at(group_name)[1];
+			raw_pose_msg.pose.position.z = target_deltas.at(group_name)[2];
+			raw_pose_msg.pose.orientation.x = 0.0;
+			raw_pose_msg.pose.orientation.y = 0.9999997;
+			raw_pose_msg.pose.orientation.z = 0.0;
+			raw_pose_msg.pose.orientation.w = 0.0007963;
+
+			Eigen::Isometry3d raw_pose;
+			tf2::fromMsg(raw_pose_msg.pose, raw_pose);
+			Eigen::Vector3d raw_position = raw_pose.translation();
+			ROS_WARN_STREAM("Raw pose: " << raw_position.transpose());
+
+			geometry_msgs::PoseStamped transformed_pose_msg;
+			// transform goal pose into planning frame
+			if (raw_pose_msg.header.frame_id != props.get<std::string>("planning_frame")) {
+				const Eigen::Isometry3d& planning_frame = scene->getFrameTransform(props.get<std::string>("planning_frame"));  // valid isometry by contract
+				// ROS_WARN_STREAM("planning frame: " << planning_frame.matrix());
+				const Eigen::Isometry3d& target_frame = scene->getFrameTransform(raw_pose_msg.header.frame_id);    // valid isometry by contract
+				// ROS_WARN_STREAM("target frame: " << target_frame.matrix());
+				Eigen::Isometry3d transform = planning_frame.inverse()*target_frame;
+				// ROS_WARN_STREAM("transform: " << transform.matrix());
+				Eigen::Vector3d transformed_position = transform*raw_position;
+				transformed_pose_msg.pose.position = tf2::toMsg(transformed_position);
+				transformed_pose_msg.header.frame_id = props.get<std::string>("planning_frame");
+				// ROS_WARN_STREAM("transformed pose: " << transformed_position.transpose());
+			} else {
+				transformed_pose_msg = raw_pose_msg;
+			}
+
+			geometry_msgs::PoseStamped target_pose_msg;
+			target_pose_msg.header.frame_id = props.get<std::string>("planning_frame");
 			if (group_name == generate_group){
 				// iterate over genrate group
 				Eigen::Vector3d rotation_axis;
 				get_exploration_axis(rotation_axis);
-				Eigen::Isometry3d target_position(Eigen::Translation3d(target_deltas.at(group_name)[0], 
-																	target_deltas.at(group_name)[1], 
-																	target_deltas.at(group_name)[2]));
+				Eigen::Isometry3d target_position(Eigen::Translation3d(transformed_pose_msg.pose.position.x, 
+																	   transformed_pose_msg.pose.position.y, 
+																	   transformed_pose_msg.pose.position.z));
 				Eigen::Isometry3d target_pose = target_position * Eigen::AngleAxisd(current_angle, rotation_axis);
 				current_angle += props.get<double>("angle_delta");
 				target_pose_msg.pose = tf2::toMsg(target_pose);
-				target_poses[group_name] = target_pose_msg;
+			} else {
+				target_pose_msg = transformed_pose_msg;
+				
 			}
-			else {
-				// other groups use default angle
-				target_pose_msg.pose.position.x = target_deltas.at(group_name)[0];
-				target_pose_msg.pose.position.y = target_deltas.at(group_name)[1];
-				target_pose_msg.pose.position.z = target_deltas.at(group_name)[2];
-				target_pose_msg.pose.orientation.x = 0.0;
-				target_pose_msg.pose.orientation.y = 0.9999997;
-				target_pose_msg.pose.orientation.z = 0.0;
-				target_pose_msg.pose.orientation.w = 0.0007963;
-				target_poses[group_name] = target_pose_msg;
-			}
+
+			target_poses[group_name] = target_pose_msg;
 		}
 		// loop end here for single joint group
 

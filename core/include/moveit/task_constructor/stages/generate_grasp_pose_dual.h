@@ -59,7 +59,7 @@ public:
     void get_exploration_axis(Eigen::Vector3d& rotation_axis);
 
 	void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }
-	void setObject(const std::string& object) { setProperty("object", object); }
+	void setObject(const GroupStringDict& objects) { setProperty("objects", objects); }
 	void setAngleDelta(double delta) { setProperty("angle_delta", delta); }
 	void setTarget(const GroupVectorDict& target_deltas) { setProperty("target_deltas", target_deltas); }
 
