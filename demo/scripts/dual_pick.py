@@ -26,6 +26,7 @@ from moveit.task_constructor import core, stages
 import threading
 import moveit_task_constructor_msgs.msg
 from moveit_msgs.srv import GetMiosPlan
+import shape_msgs.msg
 
 from py_binding_tools import roscpp_init
 
@@ -92,7 +93,50 @@ def create_clip_goal(goal_frame, goal_translation_vector):
     goal_pose.header.frame_id = goal_frame
 
     return goal_pose
+
+def get_cable_grasping_pose(common_frame, cable_start_pose, cable_end_pose):
+    tf_listener = tf.TransformListener()
+
+    # Wait for the listener to get the first transform
+    tf_listener.waitForTransform(cable_start_pose.header.frame_id, common_frame, rospy.Time(0), rospy.Duration(4.0))
+    tf_listener.waitForTransform(cable_end_pose.header.frame_id, common_frame, rospy.Time(0), rospy.Duration(4.0))
+
+    # Transform both poses to the common frame
+    pose1_transformed = tf_listener.transformPose(common_frame, cable_start_pose)
+    pose2_transformed = tf_listener.transformPose(common_frame, cable_end_pose)
     
+    # Calculate midpoint of positions
+    mid_x = (pose1_transformed.pose.position.x + pose2_transformed.pose.position.x) / 2
+    mid_y = (pose1_transformed.pose.position.y + pose2_transformed.pose.position.y) / 2
+    mid_z = (pose1_transformed.pose.position.z + pose2_transformed.pose.position.z) / 2
+    
+    return [mid_x, mid_y, mid_z]
+
+def construct_plane_constraint(link_name, frame_id):
+    constraints = moveit_msgs.msg.Constraints()
+    pos_constraint = geometry_msgs.msg.PositionConstraint()
+    pos_constraint.link_name = link_name
+    pos_constraint.header.frame_id = frame_id
+    pos_constraint.target_point_offset.z = 0.1034
+
+    primitive = shape_msgs.msg.SolidPrimitive()
+    primitive.type = shape_msgs.msg.SolidPrimitive.BOX
+    primitive.dimensions = [0]*3
+    primitive.dimensions[shape_msgs.msg.SolidPrimitive.BOX_X] = 3.0
+    primitive.dimensions[shape_msgs.msg.SolidPrimitive.BOX_Y] = 3.0
+    primitive.dimensions[shape_msgs.msg.SolidPrimitive.BOX_Z] = 0.09
+
+    box_pose = Pose()
+    box_pose.orientation.w = 1.0
+    box_pose.position.z = 0.0375
+
+    pos_constraint.constraint_region.primitives.append(primitive)
+    pos_constraint.constraint_region.primitive_poses.append(box_pose)
+    pos_constraint.weight = 1.0
+
+    constraints.position_constraints.append(pos_constraint)
+
+    return constraints
 
 class TaskPlanner():
     def __init__(self, clip_information, clip_path) -> None:        
@@ -115,12 +159,14 @@ class TaskPlanner():
         '''configuration'''
         # groups
         self.dual_arm_group = "dual_arm"
+        self.dual_hand_group = "dual_hand"
         self.follow_arm_group = "panda_2"
         self.lead_arm_group = "panda_1"
         self.follow_hand_group = "hand_2"
         self.lead_hand_group = "hand_1"
         self.follow_end_effector_link = "panda_2_link8"
         self.lead_end_effector_link = "panda_1_link8"
+        self.previouse_goal_frame = None
         
         # pose and parameters
         self.hand_open_pose_ = "open"
@@ -133,6 +179,7 @@ class TaskPlanner():
         self.lead_hand_move_group = moveit_commander.MoveGroupCommander(self.lead_hand_group)
         
         self.dual_arm_move_group = moveit_commander.MoveGroupCommander(self.dual_arm_group)
+        self.dual_hand_move_group = moveit_commander.MoveGroupCommander(self.dual_hand_group)
 
         '''exchange with mios'''
         # publisher to mios
@@ -143,9 +190,10 @@ class TaskPlanner():
         self.lock = threading.Lock()
         self.is_planning = False
         self.real_world_joint_positions = None
+        self.real_world_gripper_widths = None
         self.keep_running = True
         
-        self.execution_thread = threading.Thread(target=self.joint_status_callback_execution)
+        self.execution_thread = threading.Thread(target=self.robot_status_callback_execution)
         self.execution_thread.start()
         
         self.leader_traj_host = '10.157.174.87'
@@ -154,7 +202,30 @@ class TaskPlanner():
         self.follower_traj_port = 12345
         
         '''trajectory client'''
-        self.client_socket = socket.socket()
+        # self.client_socket = socket.socket()
+        
+        '''Initialize Sockets'''
+        # self.leader_client = socket.socket()  # instantiate
+        # try:
+        #     self.leader_client.connect((self.leader_traj_host, self.leader_traj_port))
+        #     rospy.loginfo("Connected to leader client")
+        # except socket.error as e:
+        #     rospy.logerr("Failed to connect leader client: %s", e)
+            
+        # self.follower_client = socket.socket()
+        # try:
+        #     self.follower_client.connect((self.follower_traj_host, self.follower_traj_port))
+        #     rospy.loginfo("Connected to follower client")
+        # except socket.error as e:
+        #     rospy.logerr("Failed to connect follower client: %s", e)          
+        
+    # def __del__(self):
+    #     # close sockets
+    #     # self.leader_client.close()
+    #     # self.follower_client.close()
+    #     rospy.loginfo("close sockets")
+            
+    #     print("task planner is deleted")
     
     def test_dual_joint_goal(self, follow_joint_goal:list, lead_joint_goal:list):
         self.dual_arm_move_group.set_joint_value_target(follow_joint_goal+lead_joint_goal)
@@ -176,6 +247,10 @@ class TaskPlanner():
         self.dual_arm_move_group.plan()
         self.dual_arm_move_group.go(wait=True)
     
+    def test_dual_hand(self, follow_hand_goal:list, lead_hand_goal:list):
+        self.dual_hand_move_group.set_joint_value_target(follow_hand_goal+lead_hand_goal)
+        self.dual_hand_move_group.go(wait=True)
+    
     def setup_planning_piplines(self):
         # planning pipeline
         self.cartesian_pipeline = core.CartesianPath()
@@ -191,17 +266,24 @@ class TaskPlanner():
         self.dual_pipeline.planner = "RRTConnect"
     
     def subscribe(self):
-        # subscriber to real-world joint states
-        self.joint_status_subscriber = rospy.Subscriber("mios_combined_joint_positions", moveit_msgs.msg.FromMiosJointStatus, self.joint_status_callback)
-        rospy.loginfo("start subscribe to joint state")
+        # # subscriber to real-world joint states
+        # self.joint_status_subscriber = rospy.Subscriber("mios_combined_joint_positions", moveit_msgs.msg.FromMiosJointStatus, self.joint_status_callback)
+        # rospy.loginfo("start subscribe to joint state")
+        
+        # subscriber to real-world robot states
+        self.joint_status_subscriber = rospy.Subscriber("mios_combined_joint_positions", moveit_msgs.msg.FromMiosRobotStatus, self.robot_status_callback)
+        rospy.loginfo("start subscribe to robot state")
         
         # subscriber to planning request
         # self.plan_request_subscriber = rospy.Subscriber("mios2moveit_chatter", moveit_msgs.msg.FromMios, self.plan_callback)
         # rospy.loginfo("start subscribe to planning request")
         
-        # servoce to planning request
+        # service to planning request
         self.plan_request_server = rospy.Service('mios_plan_request_service', GetMiosPlan, self.plan_callback)
         rospy.loginfo("start server to handle planning request from mios")
+        
+        # # subscriber to planning execution
+        # self.plan_execution_subscriber = rospy.Subscriber("mios2moveit_execution", std_msgs.msg.Bool, self.plan_execution_callback)
         
     def joint_status_callback_execution(self):
         '''callback function to synchronize move group joint states with real world'''
@@ -213,21 +295,44 @@ class TaskPlanner():
                     # print("joint states", self.real_world_joint_positions)
                     self.dual_arm_move_group.go(self.real_world_joint_positions, wait=True)
                     self.real_world_joint_positions = None
-        
+                    
+    def robot_status_callback_execution(self):
+        '''callback function to synchronize move group joint states with real world'''
+        # rospy.loginfo("synchronization")
+        while self.keep_running and not rospy.is_shutdown():
+            if self.real_world_joint_positions and not self.is_planning:
+                with self.lock:
+                    # self.dual_arm_move_group.set_joint_value_target(lead_current_joint+follow_current_joint)
+                    # print("joint states", self.real_world_joint_positions)
+                    self.dual_arm_move_group.go(self.real_world_joint_positions, wait=True)
+                    self.real_world_joint_positions = None
+            if self.real_world_gripper_widths and not self.is_planning:
+                with self.lock:
+                    # print("gripper states", self.real_world_gripper_widths)
+                    self.dual_hand_move_group.go(self.real_world_gripper_widths, wait=True)
+                    self.real_world_gripper_widths = None
+                   
     def joint_status_callback(self, data):
         '''callback function to update joint states from real world'''
         with self.lock:
             lead_current_joint = data.robot1_current_joint
             follow_current_joint = data.robot2_current_joint
             self.real_world_joint_positions = lead_current_joint + follow_current_joint
-    
-    def _copy_solution(self, solution):
-        copy_solution = moveit_task_constructor_msgs.msg.Solution()
-        copy_solution.start_scene = solution.start_scene
-        copy_solution.sub_solution = solution.sub_solution
-        copy_solution.sub_trajectory = solution.sub_trajectory
-        copy_solution.task_id = solution.task_id
-        return copy_solution
+            
+    def robot_status_callback(self, data):
+        '''callback function to update joint states from real world'''
+        with self.lock:
+            lead_current_joint = data.robot1_current_joint
+            follow_current_joint = data.robot2_current_joint
+            self.real_world_joint_positions = lead_current_joint + follow_current_joint
+            self.real_world_gripper_widths = (data.robot1_gripper_width/2, data.robot1_gripper_width/2, data.robot2_gripper_width/2, data.robot2_gripper_width/2)
+            
+    # def plan_execution_callback(self, data):
+    #     '''callback function to execute the planned trajectory'''
+    #     with self.lock:
+    #         if data == True:
+    #             rospy.loginfo("executing finishes")
+    #             self.is_planning = False
     
     def plan_callback(self, data):
         with self.lock:
@@ -235,12 +340,18 @@ class TaskPlanner():
             self.is_planning = True
             
             leader_pre_clip_pose = data.mios_plan_request.leader_goal_in_clip
-            leader_pre_clip_vec = [leader_pre_clip_pose.position.x, leader_pre_clip_pose.position.y, leader_pre_clip_pose.position.z]
+            leader_pre_clip_vec = [leader_pre_clip_pose.pose.position.x, leader_pre_clip_pose.pose.position.y, leader_pre_clip_pose.pose.position.z]
             follower_pre_clip_pose = data.mios_plan_request.follower_goal_in_clip
-            follower_pre_clip_vec = [follower_pre_clip_pose.position.x, follower_pre_clip_pose.position.y, follower_pre_clip_pose.position.z]
+            follower_pre_clip_vec = [follower_pre_clip_pose.pose.position.x, follower_pre_clip_pose.pose.position.y, follower_pre_clip_pose.pose.position.z]
             goal_frame = f"clip{data.mios_plan_request.clip_id}"
             
             msg_to_mios = moveit_msgs.msg.MiosPlanResponse()
+            
+            '''Initialize Sockets'''
+            # leader_client = socket.socket()  # instantiate
+            # leader_client.connect((self.leader_traj_host, self.leader_traj_port))
+            # follower_client = socket.socket()
+            # follower_client.connect((self.follower_traj_host, self.follower_traj_port))                        
              
             '''Synchronize '''
             # self.synchronize(lead_current_joint, follow_current_joint, fixed_clip)
@@ -249,7 +360,7 @@ class TaskPlanner():
             
             '''Plan'''
             try: 
-                task = self.create_task(goal_frame, leader_pre_clip_vec, follower_pre_clip_vec)
+                task = self.create_task(goal_frame, leader_pre_clip_pose, follower_pre_clip_pose)
                 if task.plan():
                     rospy.logwarn("Executing solution trajectory")
                     # task.publish(task.solutions[0])
@@ -261,6 +372,8 @@ class TaskPlanner():
                     execute_goal = task.solutions[0].toMsg(task.getIntrospection())
                     msg_to_mios.success = True
                     traj_collection = execute_goal.sub_trajectory
+                    
+                    self.is_planning = False
                     
                     for traj_msg in traj_collection:
                         traj_list = []
@@ -287,16 +400,17 @@ class TaskPlanner():
                                 smooth_traj = rtb.tools.mstraj(traj, dt=0.001, tacc=0, qdmax=0.5)
                                 
                                 '''Send trajectories to robots'''
-                                client_socket = socket.socket()  # instantiate
-                                # Skip finger joints
+                                # client_socket = socket.socket()  # instantiate
                                 
-                                # Send arm trajectories to robots
+                                # Skip finger joints and Send arm trajectories to robots
                                 if "panda_1" in joint_names[0]:
                                     response_robot_id = 1
+                                    # client_socket = leader_client
                                     server_host = self.leader_traj_host
                                     server_port = self.leader_traj_port
                                 elif "panda_2" in joint_names[0]:
                                     response_robot_id = 2
+                                    # client_socket = follower_client
                                     server_host = self.follower_traj_host
                                     server_port = self.follower_traj_port
                                 
@@ -309,35 +423,50 @@ class TaskPlanner():
                                 else:
                                     msg_to_mios.traj_id = [solution_id]
                                 
-                                client_socket.connect((server_host, server_port))
-                                # send the write or read command
-                                command = "write"
-                                client_socket.send(f"{command}".encode())
-                                # send the name of the file
-                                smooth_file_path = os.path.join(os.path.dirname(__file__), 'saved_trajectories', 'smooth_real_world_traj_'+str(solution_id)+'.txt')
-                                smooth_file_name = os.path.basename(smooth_file_path)
-                                rospy.loginfo("file name %s", smooth_file_name)
-                                client_socket.send(f"{os.path.basename(smooth_file_path)}".encode())
-                                rospy.loginfo("send file name to mios at %s", server_host)
-                                # send the trajectory
-                                joint_traj_data = pickle.dumps(smooth_traj.q)
-                                client_socket.sendall(joint_traj_data)
-                                rospy.loginfo("send smooth trajectory to mios at %s", server_host)
-                                # send the stopping signal
-                                # client_socket.send(f"end".encode())
-                                client_socket.close()
-                            
+                                # # client_socket.connect((server_host, server_port))
+                                # # send the write or read command
+                                # command = "write"
+                                # client_socket.send(f"{command}".encode())
+                                # # send the name of the file
+                                # smooth_file_path = os.path.join(os.path.dirname(__file__), 'saved_trajectories', 'smooth_real_world_traj_'+str(solution_id)+'.txt')
+                                # smooth_file_name = os.path.basename(smooth_file_path)
+                                # rospy.loginfo("file name %s", smooth_file_name)
+                                # client_socket.send(f"{os.path.basename(smooth_file_path)}".encode())
+                                # rospy.loginfo("send file name to mios at %s", server_host)
+                                # # send the trajectory
+                                # joint_traj_data = pickle.dumps(smooth_traj.q)
+                                # client_socket.sendall(joint_traj_data)
+                                # rospy.loginfo("send smooth trajectory to mios at %s", server_host)
+                                # # client_socket.close()
                     
             except Exception as ex:
                 rospy.logerr("planning failed with exception\n%s%s", ex, task)
+            
+        # close sockets
+        # leader_client.close()
+        # follower_client.close()
+        # rospy.loginfo("close sockets")
+        
+        rospy.loginfo("response is %s", msg_to_mios)
+            
         return msg_to_mios
     
-    def create_task(self, goal_frame_name,  leader_pre_clip, follower_pre_clip, use_constraint=False):
+    def create_task_single(self, goal_frame_name, lead_goal_pose, follow_goal_pose, use_constraint=False):
         t = core.Task()
         t.loadRobotModel()
         
+        # Set IK frame at TCP
+        ik_links = {self.lead_arm_group: "panda_1_hand", self.follow_arm_group: "panda_2_hand"}
+        ik_frame_1 = PoseStamped()
+        ik_frame_1.header.frame_id = ik_links[self.lead_arm_group]
+        ik_frame_1.pose = Pose(position=Vector3(z=0.1034))
+        ik_frame_2 = PoseStamped()
+        ik_frame_2.header.frame_id = ik_links[self.follow_arm_group]
+        ik_frame_2.pose = Pose(position=Vector3(z=0.1034))
+        
         # current stats
-        t.add(stages.CurrentState("current state"))
+        current_stage = stages.CurrentState("current state")
+        t.add(current_stage)
         
         # CAUTION: planning pipelines setup has to be done after getting current state
         # otherwise, the robot model is not loaded correctly
@@ -359,6 +488,13 @@ class TaskPlanner():
         # pre_move_stage = stage.get()
         grasp.insert(stage)
         
+        '''Move Leader Arm to Pre Clip Position'''
+        pre_lead = stages.MoveTo("move leader to clip", self.lead_pipeline)
+        pre_lead.group = self.lead_arm_group
+        pre_lead.ik_frame = ik_frame_1
+        pre_lead.setGoal(lead_goal_pose)
+        grasp.insert(pre_lead)
+        
         ''' Connec to Next Stage'''
         connect = stages.Connect("connect", [(self.lead_arm_group, self.lead_pipeline), (self.follow_arm_group, self.follow_pipeline)])
         connect.properties.configureInitFrom(core.Stage.PropertyInitializerSource.PARENT)
@@ -368,9 +504,9 @@ class TaskPlanner():
         
         '''Spawn IK on Fixed Pose for Dual Arm'''
         # target positions in clip frames
-        lead_goal_pose = create_clip_goal(goal_frame_name, leader_pre_clip)
+        # lead_goal_pose = create_clip_goal(goal_frame_name, leader_pre_clip)
         # self.append_frame_markers(lead_goal_pose, "leader_goal_frame")
-        follow_goal_pose = create_clip_goal(goal_frame_name, follower_pre_clip)
+        # follow_goal_pose = create_clip_goal(goal_frame_name, follower_pre_clip)
         # self.append_frame_markers(follow_goal_pose, "follower_goal_frame")
 
         # Create goal delta vectors
@@ -378,15 +514,7 @@ class TaskPlanner():
         follow_goal_delta_vector = [follow_goal_pose.pose.position.x, follow_goal_pose.pose.position.y, follow_goal_pose.pose.position.z]
         delta_pairs = {self.lead_arm_group: lead_goal_delta_vector, self.follow_arm_group: follow_goal_delta_vector}
         pre_grasp_pose = {self.lead_arm_group: "close", self.follow_arm_group: "open"}
-
-        # Set IK frame at TCP
-        ik_links = {self.lead_arm_group: "panda_1_hand", self.follow_arm_group: "panda_2_hand"}
-        ik_frame_1 = PoseStamped()
-        ik_frame_1.header.frame_id = ik_links[self.lead_arm_group]
-        ik_frame_1.pose = Pose(position=Vector3(z=0.1034))
-        ik_frame_2 = PoseStamped()
-        ik_frame_2.header.frame_id = ik_links[self.follow_arm_group]
-        ik_frame_2.pose = Pose(position=Vector3(z=0.1034))
+        goal_frames = {self.lead_arm_group: lead_goal_pose.header.frame_id, self.follow_arm_group: follow_goal_pose.header.frame_id}
 
         # Create lists and dictionaries
         ik_groups = [self.lead_arm_group, self.follow_arm_group]
@@ -401,10 +529,126 @@ class TaskPlanner():
         generator.angle_delta = 0.2
         generator.pregrasps = pre_grasp_pose
         generator.grasp = "close"
-        generator.object = goal_frame_name
+        generator.objects = goal_frames
+        generator.target_deltas = delta_pairs
+        # generator.setMonitoredStage(grasp["open hand"])
+        generator.setMonitoredStage(grasp["move leader to clip"])
+        generator.generate_group = self.follow_arm_group
+        generator.planning_frame = goal_frame_name
+        
+        # generate joint positions for both robots from IK solver
+        ik_wrapper = stages.ComputeIKMultiple("move IK dual", generator, ik_groups, self.dual_arm_group)
+        ik_wrapper.groups = ik_groups
+        ik_wrapper.group = self.dual_arm_group
+        ik_wrapper.eefs = ik_endeffectors
+        ik_wrapper.properties.configureInitFrom(core.Stage.PropertyInitializerSource.INTERFACE, ["target_poses"])
+        ik_wrapper.max_ik_solutions = 10
+        ik_wrapper.min_solution_distance = 1.0
+        ik_wrapper.setIKFrame(ik_frames)
+        
+        # set cost
+        cost_cumulative = False
+        cost_with_world = False
+        cost_group_property = "group"
+        cost_mode = core.TrajectoryCostTerm.Mode.AUTO
+        cl_cost = core.Clearance(cost_with_world, cost_cumulative,cost_group_property, cost_mode)
+        ik_wrapper.setCostTerm(cl_cost)
+        
+        grasp.insert(ik_wrapper)
+        
+        '''Close Follower Hand'''
+        stage = stages.MoveTo("close hand", self.follow_pipeline)
+        stage.group = self.follow_hand_group
+        stage.setGoal(self.hand_close_pose_)
+        grasp.insert(stage)
+        
+        t.add(grasp)
+        
+        return t
+    
+    def create_task(self, goal_frame_name, lead_goal_pose, follow_goal_pose, use_constraint=False):
+        t = core.Task()
+        t.loadRobotModel()
+        
+        # Set IK frame at TCP
+        ik_links = {self.lead_arm_group: "panda_1_hand", self.follow_arm_group: "panda_2_hand"}
+        ik_frame_1 = PoseStamped()
+        ik_frame_1.header.frame_id = ik_links[self.lead_arm_group]
+        ik_frame_1.pose = Pose(position=Vector3(z=0.1034))
+        ik_frame_2 = PoseStamped()
+        ik_frame_2.header.frame_id = ik_links[self.follow_arm_group]
+        ik_frame_2.pose = Pose(position=Vector3(z=0.1034))
+        
+        # current stats
+        t.add(stages.CurrentState("current state"))
+        
+        # CAUTION: planning pipelines setup has to be done after getting current state
+        # otherwise, the robot model is not loaded correctly
+        self.setup_planning_piplines()
+        
+        # initialize container
+        grasp = core.SerialContainer("pick object")
+        
+        ''' Close Leader Hand'''
+        stage = stages.MoveTo("close hand", self.lead_pipeline)
+        stage.group = self.lead_hand_group
+        stage.setGoal(self.hand_close_pose_)
+        grasp.insert(stage)
+        
+        ''' Open Follower Hand'''
+        stage = stages.MoveTo("open hand", self.follow_pipeline)
+        stage.group = self.follow_hand_group
+        stage.setGoal(self.hand_open_pose_)
+        grasp.insert(stage)
+        
+        # '''Move Leader Arm to Pre Clip Position'''
+        # pre_lead = stages.MoveTo("move leader to clip", self.lead_pipeline)
+        # pre_lead.group = self.lead_arm_group
+        # pre_lead.ik_frame = ik_frame_1
+        # pre_lead.setGoal(create_clip_goal(goal_frame_name, leader_pre_clip))
+        # grasp.insert(pre_lead)
+        
+        ''' Connec to Next Stage'''
+        connect = stages.Connect("connect", [(self.lead_arm_group, self.lead_pipeline), (self.follow_arm_group, self.follow_pipeline)])
+        # connect = stages.Connect("connect",[(self.dual_arm_group, self.dual_pipeline)])
+        connect.properties.configureInitFrom(core.Stage.PropertyInitializerSource.PARENT)
+        connect.max_distance = 1e-3
+        # props.configureInitFrom(core.Stage.PropertyInitializerSource.PARENT, ["target_pose"])   
+        grasp.insert(connect)
+        
+        '''Spawn IK on Fixed Pose for Dual Arm'''
+        # target positions in clip frames
+        # lead_goal_pose = create_clip_goal(goal_frame_name, leader_pre_clip)
+        # self.append_frame_markers(lead_goal_pose, "leader_goal_frame")
+        # follow_goal_pose = create_clip_goal(goal_frame_name, follower_pre_clip)
+        # self.append_frame_markers(follow_goal_pose, "follower_goal_frame")
+
+        # Create goal delta vectors
+        lead_goal_delta_vector = [lead_goal_pose.pose.position.x, lead_goal_pose.pose.position.y, lead_goal_pose.pose.position.z]
+        follow_goal_delta_vector = [follow_goal_pose.pose.position.x, follow_goal_pose.pose.position.y, follow_goal_pose.pose.position.z]
+        delta_pairs = {self.lead_arm_group: lead_goal_delta_vector, self.follow_arm_group: follow_goal_delta_vector}
+        pre_grasp_pose = {self.lead_arm_group: "close", self.follow_arm_group: "open"}
+        goal_frames = {self.lead_arm_group: lead_goal_pose.header.frame_id, self.follow_arm_group: follow_goal_pose.header.frame_id}
+
+        # Create lists and dictionaries
+        ik_groups = [self.lead_arm_group, self.follow_arm_group]
+        ik_endeffectors = {self.lead_arm_group: self.lead_hand_group, self.follow_arm_group: self.follow_hand_group}
+        ik_frames = {self.lead_arm_group: ik_frame_1, self.follow_arm_group: ik_frame_2}
+        
+        # generate grasping cartesian pose, fixed pose for leader arm, random for follower arm
+        generator = stages.GenerateGraspPoseDual("generate grasp pose dual", ik_groups)
+        generator.eefs = ik_endeffectors
+        generator.marker_ns = "grasp_pose"
+        generator.explr_axis = "y"
+        generator.angle_delta = 0.2
+        generator.pregrasps = pre_grasp_pose
+        generator.grasp = "close"
+        generator.objects = goal_frames
         generator.target_deltas = delta_pairs
         generator.setMonitoredStage(grasp["open hand"])
+        # generator.setMonitoredStage(grasp["move leader to clip"])
         generator.generate_group = self.follow_arm_group
+        generator.planning_frame = goal_frame_name
         
         # generate joint positions for both robots from IK solver
         ik_wrapper = stages.ComputeIKMultiple("move IK dual", generator, ik_groups, self.dual_arm_group)
@@ -518,6 +762,8 @@ class TaskPlanner():
             rospy.sleep(1.0)
             end = rospy.get_time()
         
+def test_shutdown():
+    rospy.loginfo("Shutting down")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments for fixture scene loading')
@@ -530,6 +776,8 @@ if __name__ == '__main__':
     ## First initialize `moveit_commander`_ and a `rospy`_ node:
     # moveit_commander.roscpp_initialize(sys.argv)
     rospy.init_node("mtc_task_planner", anonymous=True)
+    
+    rospy.on_shutdown(test_shutdown)
         
     # clear previous planning
     rospy.wait_for_service('/clear_octomap') #this will stop your code until the clear octomap service starts running
@@ -547,36 +795,54 @@ if __name__ == '__main__':
     leader_post_clip = [-0.05, 0, 0]  # [0.575, -0.081, 1.128]  # [0.552, 0.069, 1.128]
     follower_post_clip = [0.05, 0, 0]  # [0.552, 0.069, 1.128]  # [0.575, -0.081, 1.128]
     
-    task_planner = TaskPlanner(clip_information=args.clip_file, clip_path=[7]) #7, 6, 9
+    task_planner = TaskPlanner(clip_information=args.clip_file, clip_path=[7, 6, 9]) #7, 6, 9
     
     '''Mios Plan Service'''
+    # task_planner.test_dual_hand([0.02, 0.02], [0.02, 0.02])
     # task_planner.subscribe()
     
-    '''MTC Direct Test'''
-    for clip_id in task_planner.clip_togo:
-        goal_frame = f"clip{clip_id}"
-        task = task_planner.create_task(goal_frame, leader_pre_clip, follower_pre_clip)
+    # subscriber to real-world robot states
+    joint_status_subscriber = rospy.Subscriber("mios_combined_joint_positions", moveit_msgs.msg.FromMiosRobotStatus, task_planner.robot_status_callback)
+    rospy.loginfo("start subscribe to robot state")
         
-        # try:
-        #     if task.plan():
-        #         rospy.logwarn("Executing solution trajectory")
-        #         task.publish(task.solutions[0])
-        #         execute_result = task.execute(task.solutions[0])
-        #         task_planner.clip_togo.remove(clip_id)
-        #         task_planner.clip_achieved.append(clip_id)
-        #         if execute_result.val != moveit_msgs.msg.MoveItErrorCodes.SUCCESS:
-        #             rospy.logerr("Task execution failed and returned: %s", execute_result.val)
-        # except Exception as e:
-        #     print("planning failed with exception\n", e)
-        #     continue
-        
-        if task.plan():
-            rospy.logwarn("Executing solution trajectory")
-            # task.publish(task.solutions[0])
-            execute_result = task.execute(task.solutions[0])
+    # # service to planning request
+    plan_request_server = rospy.Service('mios_plan_request_service', GetMiosPlan, task_planner.plan_callback)
+    rospy.loginfo("start server to handle planning request from mios")
     
-        # while not rospy.is_shutdown():
-        #     rospy.sleep(1)
+    '''MTC Direct Test'''
+    # previouse_goal_frame = None
+    # for clip_id in task_planner.clip_togo:
+    #     goal_frame = f"clip{clip_id}"
+    #     if previouse_goal_frame is None:
+    #         leader_pre_pose = create_clip_goal(goal_frame, leader_pre_clip)
+    #         follower_pre_pose = create_clip_goal(goal_frame, follower_pre_clip)
+    #     else:
+    #         # follower_pre_clip = get_cable_grasping_pose(goal_frame, create_clip_goal(previouse_goal_frame, leader_pre_clip), create_clip_goal(goal_frame, follower_pre_clip))
+    #         follower_pre_pose = create_clip_goal(previouse_goal_frame, leader_pre_clip)
+    #         leader_pre_pose = create_clip_goal(goal_frame, follower_pre_clip)
+    #         # get_cable_grasping_pose(goal_frame, follower_pre_pose, leader_pre_pose)
+    #     task = task_planner.create_task(goal_frame, leader_pre_pose, follower_pre_pose)
+        
+    #     # try:
+    #     #     if task.plan():
+    #     #         rospy.logwarn("Executing solution trajectory")
+    #     #         task.publish(task.solutions[0])
+    #     #         execute_result = task.execute(task.solutions[0])
+    #     #         task_planner.clip_togo.remove(clip_id)
+    #     #         task_planner.clip_achieved.append(clip_id)
+    #     #         if execute_result.val != moveit_msgs.msg.MoveItErrorCodes.SUCCESS:
+    #     #             rospy.logerr("Task execution failed and returned: %s", execute_result.val)
+    #     # except Exception as e:
+    #     #     print("planning failed with exception\n", e)
+    #     #     continue
+        
+    #     if task.plan():
+    #         rospy.logwarn("Executing solution trajectory")
+    #         # task.publish(task.solutions[0])
+    #         execute_result = task.execute(task.solutions[0])
+        
+    #     previouse_goal_frame = goal_frame
+    
     
     rospy.spin()
     
