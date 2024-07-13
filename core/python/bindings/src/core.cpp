@@ -479,7 +479,7 @@ void export_core(pybind11::module& m) {
 	        "solution"_a, "Publish the given solution to the ROS topic ``solution``")
 	    .def(
 	        "execute",
-	        [](Task& self, const SolutionBasePtr& solution) {
+	        [](Task& self, const SolutionBasePtr& solution)-> std::vector<moveit_task_constructor_msgs::SubTrajectory> {
 		        using namespace moveit::planning_interface;
 		        PlanningSceneInterface psi;
 		        MoveGroupInterface mgi(solution->start()->scene()->getRobotModel()->getJointModelGroupNames()[0]);
@@ -493,12 +493,13 @@ void export_core(pybind11::module& m) {
 				        plan.trajectory_ = traj.trajectory;
 				        if (!mgi.execute(plan)) {
 					        ROS_ERROR("Execution failed! Aborting!");
-					        return;
+					        return {};
 				        }
 			        }
 			        psi.applyPlanningScene(traj.scene_diff);
 		        }
 		        ROS_INFO("Executed successfully");
+				return serialized.sub_trajectory;
 	        },
 	        "solution"_a, "Send given solution to ``move_group`` node for execution")
 		.def("getIntrospection", &Task::getIntrospection, "Enable introspection and return the introspection pointer");

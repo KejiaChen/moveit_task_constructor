@@ -348,10 +348,10 @@ class TaskPlanner():
             msg_to_mios = moveit_msgs.msg.MiosPlanResponse()
             
             '''Initialize Sockets'''
-            # leader_client = socket.socket()  # instantiate
-            # leader_client.connect((self.leader_traj_host, self.leader_traj_port))
-            # follower_client = socket.socket()
-            # follower_client.connect((self.follower_traj_host, self.follower_traj_port))                        
+            leader_client = socket.socket()  # instantiate
+            leader_client.connect((self.leader_traj_host, self.leader_traj_port))
+            follower_client = socket.socket()
+            follower_client.connect((self.follower_traj_host, self.follower_traj_port))                        
              
             '''Synchronize '''
             # self.synchronize(lead_current_joint, follow_current_joint, fixed_clip)
@@ -366,13 +366,9 @@ class TaskPlanner():
                     # task.publish(task.solutions[0])
                     
                     solution = task.solutions[0]
-                    execute_result = task.execute(solution)
-                        
-                    # execute_goal = moveit_task_constructor_msgs.Solution 
-                    execute_goal = task.solutions[0].toMsg(task.getIntrospection())
-                    msg_to_mios.success = True
-                    traj_collection = execute_goal.sub_trajectory
+                    traj_collection = task.execute(solution)
                     
+                    msg_to_mios.success = True
                     self.is_planning = False
                     
                     for traj_msg in traj_collection:
@@ -400,17 +396,17 @@ class TaskPlanner():
                                 smooth_traj = rtb.tools.mstraj(traj, dt=0.001, tacc=0, qdmax=0.5)
                                 
                                 '''Send trajectories to robots'''
-                                # client_socket = socket.socket()  # instantiate
+                                client_socket = socket.socket()  # instantiate
                                 
                                 # Skip finger joints and Send arm trajectories to robots
                                 if "panda_1" in joint_names[0]:
                                     response_robot_id = 1
-                                    # client_socket = leader_client
+                                    client_socket = leader_client
                                     server_host = self.leader_traj_host
                                     server_port = self.leader_traj_port
                                 elif "panda_2" in joint_names[0]:
                                     response_robot_id = 2
-                                    # client_socket = follower_client
+                                    client_socket = follower_client
                                     server_host = self.follower_traj_host
                                     server_port = self.follower_traj_port
                                 
@@ -423,29 +419,29 @@ class TaskPlanner():
                                 else:
                                     msg_to_mios.traj_id = [solution_id]
                                 
-                                # # client_socket.connect((server_host, server_port))
-                                # # send the write or read command
-                                # command = "write"
-                                # client_socket.send(f"{command}".encode())
-                                # # send the name of the file
-                                # smooth_file_path = os.path.join(os.path.dirname(__file__), 'saved_trajectories', 'smooth_real_world_traj_'+str(solution_id)+'.txt')
-                                # smooth_file_name = os.path.basename(smooth_file_path)
-                                # rospy.loginfo("file name %s", smooth_file_name)
-                                # client_socket.send(f"{os.path.basename(smooth_file_path)}".encode())
-                                # rospy.loginfo("send file name to mios at %s", server_host)
-                                # # send the trajectory
-                                # joint_traj_data = pickle.dumps(smooth_traj.q)
-                                # client_socket.sendall(joint_traj_data)
-                                # rospy.loginfo("send smooth trajectory to mios at %s", server_host)
-                                # # client_socket.close()
+                                # client_socket.connect((server_host, server_port))
+                                # send the write or read command
+                                command = "write"
+                                client_socket.send(f"{command}".encode())
+                                # send the name of the file
+                                smooth_file_path = os.path.join(os.path.dirname(__file__), 'saved_trajectories', 'smooth_real_world_traj_'+str(solution_id)+'.txt')
+                                smooth_file_name = os.path.basename(smooth_file_path)
+                                rospy.loginfo("file name %s", smooth_file_name)
+                                client_socket.send(f"{os.path.basename(smooth_file_path)}".encode())
+                                rospy.loginfo("send file name to mios at %s", server_host)
+                                # send the trajectory
+                                joint_traj_data = pickle.dumps(smooth_traj.q)
+                                client_socket.sendall(joint_traj_data)
+                                rospy.loginfo("send smooth trajectory to mios at %s", server_host)
+                                # client_socket.close()
                     
             except Exception as ex:
                 rospy.logerr("planning failed with exception\n%s%s", ex, task)
             
         # close sockets
-        # leader_client.close()
-        # follower_client.close()
-        # rospy.loginfo("close sockets")
+        leader_client.close()
+        follower_client.close()
+        rospy.loginfo("close sockets")
         
         rospy.loginfo("response is %s", msg_to_mios)
             

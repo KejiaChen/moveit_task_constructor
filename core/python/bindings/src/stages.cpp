@@ -504,7 +504,7 @@ void export_stages(pybind11::module& m) {
 			Take a look at the :ref:`How-To-Guides <subsubsec-howto-generate-grasp-pose>`
 			for a snippet that demonstrates usage of the `GenerateGraspPose` stage.
 		)")
-	    .property<std::string>("object", R"(
+	    .property<GroupStringDict>("objects", R"(
 			str: Name of the Object in the planning scene, which should be grasped
 		)")
 	    .property<GroupStringDict>("eefs", R"(
@@ -525,6 +525,9 @@ void export_stages(pybind11::module& m) {
 		)")
 		.property<std::string>("generate_group", R"(
 			str: Name of the group that should generate the grasp pose
+		)")
+		.property<std::string>("planning_frame", R"(
+			str: Name of the frame that pose randomization is done.
 		)")
 	    .def(py::init<const std::string&, const std::vector<std::string>&>(), "name"_a, "group_names"_a);
 

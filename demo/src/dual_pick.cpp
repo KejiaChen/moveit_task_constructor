@@ -403,6 +403,8 @@ Task createTaskRaw(std::string& goal_frame_name, bool use_constraint) {
 		***************************************************/
 		{
 		/* Set target positions from clip frame*/
+		GroupStringDict goal_frames = {{lead_arm_group, goal_frame_name}, {follow_arm_group, goal_frame_name}};
+
 		geometry_msgs::PoseStamped lead_goal_pose;
 		lead_goal_pose = createClipGoal(goal_frame_name, leader_pre_clip);
 		appendFrameMarkers(marker_pub, lead_goal_pose, "leader_goal_frame");
@@ -429,17 +431,18 @@ Task createTaskRaw(std::string& goal_frame_name, bool use_constraint) {
 		GroupPoseMatrixDict ik_frames = {{lead_arm_group, ik_frame_1}, {follow_arm_group, ik_frame_2}};
 		
 		/* generate grasp pose, randomize for follower */
-		auto grasp_generator = std::make_unique<stages::GenerateGraspPoseDual>("generate grasp pose", ik_groups);
+		auto grasp_generator = std::make_unique<stages::GenerateGraspPoseDual>("generate grasp pose dual", ik_groups);
 		grasp_generator->setEndEffector(ik_endeffectors);
 		grasp_generator->properties().set("marker_ns", "grasp_pose");
 		grasp_generator->properties().set("explr_axis", "y");
 		grasp_generator->setAngleDelta(0.2); // enumerate over angles from 0 to 6.4 (less then 2 PI)
 		grasp_generator->setPreGraspPose(pre_grasp_pose);
 		grasp_generator->setGraspPose("close");
-		grasp_generator->setObject(goal_frame_name); // object sets target pose frame
+		grasp_generator->setObject(goal_frames); // object sets target pose frame
 		grasp_generator->setTarget(delta_pairs);
 		grasp_generator->setMonitoredStage(pre_move_stage_ptr);
 		grasp_generator->properties().set("generate_group", follow_arm_group);
+		grasp_generator->properties().set("planning_frame", goal_frame_name);
 
 		auto ik_wrapper = std::make_unique<stages::ComputeIKMultiple>("move IK dual", std::move(grasp_generator), ik_groups, dual_arm_group);
 		ik_wrapper->setSubGroups(ik_groups);
@@ -569,16 +572,16 @@ Task createTaskRaw(std::string& goal_frame_name, bool use_constraint) {
 		/****************************************************
   ---- *               Connect to next stage                 *
 		***************************************************/
-// 		{
-// 		stages::Connect::GroupPlannerVector planners = {{follow_arm_group, follow_pipeline}, {lead_arm_group, lead_pipeline}};
-// 		// {follow_hand_group, follow_pipeline}, {lead_hand_group, lead_pipeline}
-// 		auto connect = std::make_unique<stages::Connect>("connect", planners);
-// 		connect->properties().configureInitFrom(Stage::PARENT);
-// 		connect->properties().set("max_distance", 1e-3); // max allowable distance between end and goal position
+		// {
+		// stages::Connect::GroupPlannerVector planners = {{follow_arm_group, follow_pipeline}, {lead_arm_group, lead_pipeline}};
+		// // {follow_hand_group, follow_pipeline}, {lead_hand_group, lead_pipeline}
+		// auto connect = std::make_unique<stages::Connect>("connect", planners);
+		// connect->properties().configureInitFrom(Stage::PARENT);
+		// connect->properties().set("max_distance", 1e-3); // max allowable distance between end and goal position
 		
-// 		grasp->insert(std::move(connect));
-// 		// t.add(std::move(connect));
-// 		}
+		// grasp->insert(std::move(connect));
+		// // t.add(std::move(connect));
+		// }
 	
 // 		/****************************************************
 //   ---- *            Grasp POSE generator for follower     *
@@ -628,6 +631,11 @@ Task createTaskRaw(std::string& goal_frame_name, bool use_constraint) {
 		// ik_frame.translation().z() = 0.1034;
 		// // // TODO: should it be "panda_hand" or "panda_link8"?
 		// ik_wrapper->setIKFrame(ik_frame, "panda_2_hand");
+
+		// auto cl_cost{ std::make_unique<cost::Clearance>() };
+		// cl_cost->cumulative = true;  // sum up pairwise distances between the robot to all objects?
+		// cl_cost->with_world = true;  // consider distance of the robot to world objects?
+		// ik_wrapper->setCostTerm(std::move(cl_cost));
 		
 		// grasp->insert(std::move(ik_wrapper));
 		// // t.add(std::move(ik_wrapper));
@@ -794,22 +802,22 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	task = createTaskHome();
-	try {
-		if (task.plan())
-			// ROS_WARN("planning for clip %s succeeded", clip_id.c_str());
-			task.introspection().publishSolution(*task.solutions().front());
+	// task = createTaskHome();
+	// try {
+	// 	if (task.plan())
+	// 		// ROS_WARN("planning for clip %s succeeded", clip_id.c_str());
+	// 		task.introspection().publishSolution(*task.solutions().front());
 
-			ROS_WARN("Executing solution trajectory");
-			moveit_msgs::MoveItErrorCodes execute_result;
+	// 		ROS_WARN("Executing solution trajectory");
+	// 		moveit_msgs::MoveItErrorCodes execute_result;
 
-			execute_result = task.execute(*task.solutions().front());
-			if (execute_result.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
-				ROS_ERROR_STREAM("Task execution failed and returned: " << execute_result.val);
-			}
-		} catch (const InitStageException& ex) {
-			std::cerr << "planning failed with exception" << std::endl << ex << task;
-		}
+	// 		execute_result = task.execute(*task.solutions().front());
+	// 		if (execute_result.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+	// 			ROS_ERROR_STREAM("Task execution failed and returned: " << execute_result.val);
+	// 		}
+	// 	} catch (const InitStageException& ex) {
+	// 		std::cerr << "planning failed with exception" << std::endl << ex << task;
+	// 	}
 		
     // task.printState();
 
@@ -828,7 +836,7 @@ int main(int argc, char** argv) {
     // std::cerr << "Error: 'generate grasp pose' stage not found." << std::endl;
     // }
 
-	ros::waitForShutdown();  // keep alive for interactive inspection in rviz
+	// ros::waitForShutdown();  // keep alive for interactive inspection in rviz
 	return 0;
 }
 
