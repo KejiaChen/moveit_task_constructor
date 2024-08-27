@@ -184,8 +184,8 @@ moveit_msgs::CollisionObject createCubeObject(ros::Publisher& marker_pub) {
 	// // Append frame markers
 	// std::deque<visualization_msgs::Marker> object_markers;
 
-	    geometry_msgs::PoseStamped pose_stamped;
-		pose_stamped.pose = pose;
+	geometry_msgs::PoseStamped pose_stamped;
+	pose_stamped.pose = pose;
 	// // pose_stamped.pose = tf2::toMsg(object_pose);
     pose_stamped.header.frame_id = "world";
 	// rviz_marker_tools::appendFrame(object_markers, pose_stamped, 0.1, "object frame");
@@ -415,7 +415,10 @@ Task createTaskRaw(std::string& goal_frame_name, bool use_constraint) {
 
 		std::vector<double> lead_goal_delta_vector = {lead_goal_pose.pose.position.x, lead_goal_pose.pose.position.y, lead_goal_pose.pose.position.z};
 		std::vector<double> follow_goal_delta_vector = {follow_goal_pose.pose.position.x, follow_goal_pose.pose.position.y, follow_goal_pose.pose.position.z};
+		std::vector<double> lead_goal_orient_vector = {lead_goal_pose.pose.orientation.x, lead_goal_pose.pose.orientation.y, lead_goal_pose.pose.position.z, lead_goal_pose.pose.orientation.w};
+		std::vector<double> follow_goal_orient_vector = {follow_goal_pose.pose.orientation.x, follow_goal_pose.pose.orientation.y, follow_goal_pose.pose.position.z, follow_goal_pose.pose.orientation.w};
 		GroupVectorDict delta_pairs = {{lead_arm_group, lead_goal_delta_vector}, {follow_arm_group, follow_goal_delta_vector}};
+		GroupVectorDict orient_pairs = {{lead_arm_group, lead_goal_orient_vector}, {follow_arm_group, follow_goal_orient_vector}};
 		GroupStringDict pre_grasp_pose = {{lead_arm_group, "close"}, {follow_arm_group, "open"}};
 
 		/* Set IK frame at TCP*/	
@@ -439,7 +442,8 @@ Task createTaskRaw(std::string& goal_frame_name, bool use_constraint) {
 		grasp_generator->setPreGraspPose(pre_grasp_pose);
 		grasp_generator->setGraspPose("close");
 		grasp_generator->setObject(goal_frames); // object sets target pose frame
-		grasp_generator->setTarget(delta_pairs);
+		grasp_generator->setTargetDelta(delta_pairs);
+		grasp_generator->setTargetOrient(orient_pairs);
 		grasp_generator->setMonitoredStage(pre_move_stage_ptr);
 		grasp_generator->properties().set("generate_group", follow_arm_group);
 		grasp_generator->properties().set("planning_frame", goal_frame_name);

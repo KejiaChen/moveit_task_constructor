@@ -57,6 +57,7 @@ GenerateGraspPoseDual::GenerateGraspPoseDual(const std::string& name, const std:
 	p.declare<GroupStringDict>("eefs", "vector of names of end-effector group");
 	p.declare<GroupStringDict>("objects");
     p.declare<GroupVectorDict>("target_deltas", "relative position of target pose in object frame"); //{1, 0, 0},
+	p.declare<GroupVectorDict>("target_orients", "relative orientation of target pose in object frame"); //{1, 0, 0},
 	p.declare<double>("angle_delta", 0.1, "angular steps (rad)");
     p.declare<std::string>("explr_axis", "x", "axis around which rotation is performed to spawn various grasps");
 
@@ -185,6 +186,7 @@ void GenerateGraspPoseDual::compute() {
 	const auto& props = properties();
 	const GroupStringDict& eefs = props.get<GroupStringDict>("eefs");
 	const GroupVectorDict& target_deltas = props.get<GroupVectorDict>("target_deltas");
+	const GroupVectorDict& target_orients = props.get<GroupVectorDict>("target_orients");
 
 	moveit::core::RobotState& robot_state = scene->getCurrentStateNonConst();
 	double current_angle = 0.0;
@@ -231,15 +233,22 @@ void GenerateGraspPoseDual::compute() {
 			raw_pose_msg.pose.position.x = target_deltas.at(group_name)[0];
 			raw_pose_msg.pose.position.y = target_deltas.at(group_name)[1];
 			raw_pose_msg.pose.position.z = target_deltas.at(group_name)[2];
-			raw_pose_msg.pose.orientation.x = 0.0;
-			raw_pose_msg.pose.orientation.y = 0.9999997;
-			raw_pose_msg.pose.orientation.z = 0.0;
-			raw_pose_msg.pose.orientation.w = 0.0007963;
+			raw_pose_msg.pose.orientation.x = target_orients.at(group_name)[0]; // 0.0;
+			raw_pose_msg.pose.orientation.y = target_orients.at(group_name)[1]; // 0.9999997;
+			raw_pose_msg.pose.orientation.z = target_orients.at(group_name)[2]; // 0.0;
+			raw_pose_msg.pose.orientation.w = target_orients.at(group_name)[3]; // 0.0007963;
 
 			Eigen::Isometry3d raw_pose;
 			tf2::fromMsg(raw_pose_msg.pose, raw_pose);
 			Eigen::Vector3d raw_position = raw_pose.translation();
-			ROS_WARN_STREAM("Raw pose: " << raw_position.transpose());
+			ROS_WARN_STREAM("Raw position: " << raw_position.transpose());
+			Eigen::Matrix3d raw_orientation = raw_pose.rotation();
+			Eigen::Quaterniond raw_orientation_quaternion(raw_orientation);
+			ROS_WARN_STREAM("Raw orientation: " 
+							<< "x: " << raw_orientation_quaternion.x() 
+							<< ", y: " << raw_orientation_quaternion.y() 
+							<< ", z: " << raw_orientation_quaternion.z() 
+							<< ", w: " << raw_orientation_quaternion.w());
 
 			geometry_msgs::PoseStamped transformed_pose_msg;
 			// transform goal pose into planning frame
@@ -252,6 +261,9 @@ void GenerateGraspPoseDual::compute() {
 				// ROS_WARN_STREAM("transform: " << transform.matrix());
 				Eigen::Vector3d transformed_position = transform*raw_position;
 				transformed_pose_msg.pose.position = tf2::toMsg(transformed_position);
+				Eigen::Matrix3d transformed_orientation = transform.linear()*raw_orientation;
+				Eigen::Quaterniond transformed_orientation_quaternion(transformed_orientation);
+				transformed_pose_msg.pose.orientation = tf2::toMsg(transformed_orientation_quaternion);
 				transformed_pose_msg.header.frame_id = props.get<std::string>("planning_frame");
 				// ROS_WARN_STREAM("transformed pose: " << transformed_position.transpose());
 			} else {

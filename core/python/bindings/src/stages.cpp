@@ -513,6 +513,9 @@ void export_stages(pybind11::module& m) {
 		.property<GroupVectorDict>("target_deltas", R"(
 			map<str, vector<double>>: relative position of target pose in object frame of each group
 		)")
+		.property<GroupVectorDict>("target_orients", R"(
+			map<str, vector<double>>: relative orientation of target pose in object frame of each group
+		)")
 	    .property<std::map<std::string, std::string>>("pregrasps", R"(
 			map<str, str>: Name of the pre-grasp pose for each robot group
 		)")

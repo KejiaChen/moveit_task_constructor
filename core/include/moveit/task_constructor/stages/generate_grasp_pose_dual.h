@@ -61,7 +61,8 @@ public:
 	void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }
 	void setObject(const GroupStringDict& objects) { setProperty("objects", objects); }
 	void setAngleDelta(double delta) { setProperty("angle_delta", delta); }
-	void setTarget(const GroupVectorDict& target_deltas) { setProperty("target_deltas", target_deltas); }
+	void setTargetDelta(const GroupVectorDict& target_deltas) { setProperty("target_deltas", target_deltas); }
+	void setTargetOrient(const GroupVectorDict& target_orients) { setProperty("target_orients", target_orients); }
 
 	void setPreGraspPose(const std::map<std::string, std::string>& pregrasps) { setProperty("pregrasps", pregrasps); }
 	void setPreGraspPose(const std::map<std::string,moveit_msgs::RobotState>& pregrasps) { setProperty("pregrasps", pregrasps); }
