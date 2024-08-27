@@ -335,10 +335,16 @@ class TaskPlanner():
     #             self.is_planning = False
     
     def plan_callback(self, data):
+        local_test = False
+        
         with self.lock:
             rospy.loginfo(rospy.get_caller_id() + " I heard %s", data)
             self.is_planning = True
             
+            leader_start_joint = data.mios_plan_request.leader_current_joint
+            follower_start_joint = data.mios_plan_request.follower_current_joint
+            leader_gripper_width = data.mios_plan_request.leader_gripper_width
+            follower_gripper_width = data.mios_plan_request.follower_gripper_width
             leader_pre_clip_pose = data.mios_plan_request.leader_goal_in_clip
             leader_pre_clip_vec = [leader_pre_clip_pose.pose.position.x, leader_pre_clip_pose.pose.position.y, leader_pre_clip_pose.pose.position.z]
             follower_pre_clip_pose = data.mios_plan_request.follower_goal_in_clip
@@ -348,15 +354,20 @@ class TaskPlanner():
             msg_to_mios = moveit_msgs.msg.MiosPlanResponse()
             
             '''Initialize Sockets'''
-            leader_client = socket.socket()  # instantiate
-            leader_client.connect((self.leader_traj_host, self.leader_traj_port))
-            follower_client = socket.socket()
-            follower_client.connect((self.follower_traj_host, self.follower_traj_port))                        
+            if not local_test:
+                leader_client = socket.socket()  # instantiate
+                leader_client.connect((self.leader_traj_host, self.leader_traj_port))
+                follower_client = socket.socket()
+                follower_client.connect((self.follower_traj_host, self.follower_traj_port))                        
              
-            '''Synchronize '''
+            '''Synchronize before planning starts'''
             # self.synchronize(lead_current_joint, follow_current_joint, fixed_clip)
             # lead_current_pose = self.lead_arm_move_group.get_current_pose().pose
             # rotation_matrix_r1 = msg_orientation_to_matrix(lead_current_pose.orientation)
+            real_world_joint_positions = leader_start_joint + follower_start_joint
+            self.dual_arm_move_group.go(real_world_joint_positions, wait=True)
+            real_world_gripper_widths = (leader_gripper_width/2, leader_gripper_width/2, follower_gripper_width/2, follower_gripper_width/2)
+            self.dual_hand_move_group.go(real_world_gripper_widths, wait=True)
             
             '''Plan'''
             try: 
@@ -396,52 +407,55 @@ class TaskPlanner():
                                 smooth_traj = rtb.tools.mstraj(traj, dt=0.001, tacc=0, qdmax=0.5)
                                 
                                 '''Send trajectories to robots'''
-                                client_socket = socket.socket()  # instantiate
+                                if not local_test:
+                                    client_socket = socket.socket()  # instantiate
+                                    
+                                    # Skip finger joints and Send arm trajectories to robots
+                                    if "panda_1" in joint_names[0]:
+                                        response_robot_id = 1
+                                        client_socket = leader_client
+                                        server_host = self.leader_traj_host
+                                        server_port = self.leader_traj_port
+                                    elif "panda_2" in joint_names[0]:
+                                        response_robot_id = 2
+                                        client_socket = follower_client
+                                        server_host = self.follower_traj_host
+                                        server_port = self.follower_traj_port
+                                    
+                                    if msg_to_mios.robot_id:
+                                        msg_to_mios.robot_id.append(response_robot_id)
+                                    else:
+                                        msg_to_mios.robot_id = [response_robot_id]
+                                    if msg_to_mios.traj_id:
+                                        msg_to_mios.traj_id.append(solution_id)
+                                    else:
+                                        msg_to_mios.traj_id = [solution_id]
                                 
-                                # Skip finger joints and Send arm trajectories to robots
-                                if "panda_1" in joint_names[0]:
-                                    response_robot_id = 1
-                                    client_socket = leader_client
-                                    server_host = self.leader_traj_host
-                                    server_port = self.leader_traj_port
-                                elif "panda_2" in joint_names[0]:
-                                    response_robot_id = 2
-                                    client_socket = follower_client
-                                    server_host = self.follower_traj_host
-                                    server_port = self.follower_traj_port
                                 
-                                if msg_to_mios.robot_id:
-                                    msg_to_mios.robot_id.append(response_robot_id)
-                                else:
-                                    msg_to_mios.robot_id = [response_robot_id]
-                                if msg_to_mios.traj_id:
-                                    msg_to_mios.traj_id.append(solution_id)
-                                else:
-                                    msg_to_mios.traj_id = [solution_id]
-                                
-                                # client_socket.connect((server_host, server_port))
-                                # send the write or read command
-                                command = "write"
-                                client_socket.send(f"{command}".encode())
-                                # send the name of the file
-                                smooth_file_path = os.path.join(os.path.dirname(__file__), 'saved_trajectories', 'smooth_real_world_traj_'+str(solution_id)+'.txt')
-                                smooth_file_name = os.path.basename(smooth_file_path)
-                                rospy.loginfo("file name %s", smooth_file_name)
-                                client_socket.send(f"{os.path.basename(smooth_file_path)}".encode())
-                                rospy.loginfo("send file name to mios at %s", server_host)
-                                # send the trajectory
-                                joint_traj_data = pickle.dumps(smooth_traj.q)
-                                client_socket.sendall(joint_traj_data)
-                                rospy.loginfo("send smooth trajectory to mios at %s", server_host)
-                                # client_socket.close()
+                                    # client_socket.connect((server_host, server_port))
+                                    # send the write or read command
+                                    command = "write"
+                                    client_socket.send(f"{command}".encode())
+                                    # send the name of the file
+                                    smooth_file_path = os.path.join(os.path.dirname(__file__), 'saved_trajectories', 'smooth_real_world_traj_'+str(solution_id)+'.txt')
+                                    smooth_file_name = os.path.basename(smooth_file_path)
+                                    rospy.loginfo("file name %s", smooth_file_name)
+                                    client_socket.send(f"{os.path.basename(smooth_file_path)}".encode())
+                                    rospy.loginfo("send file name to mios at %s", server_host)
+                                    # send the trajectory
+                                    joint_traj_data = pickle.dumps(smooth_traj.q)
+                                    client_socket.sendall(joint_traj_data)
+                                    rospy.loginfo("send smooth trajectory to mios at %s", server_host)
+                                    # client_socket.close()
                     
             except Exception as ex:
                 rospy.logerr("planning failed with exception\n%s%s", ex, task)
             
         # close sockets
-        leader_client.close()
-        follower_client.close()
-        rospy.loginfo("close sockets")
+        if not local_test:
+            leader_client.close()
+            follower_client.close()
+            rospy.loginfo("close sockets")
         
         rospy.loginfo("response is %s", msg_to_mios)
             
@@ -622,7 +636,10 @@ class TaskPlanner():
         # Create goal delta vectors
         lead_goal_delta_vector = [lead_goal_pose.pose.position.x, lead_goal_pose.pose.position.y, lead_goal_pose.pose.position.z]
         follow_goal_delta_vector = [follow_goal_pose.pose.position.x, follow_goal_pose.pose.position.y, follow_goal_pose.pose.position.z]
+        lead_goal_orient_vector = [lead_goal_pose.pose.orientation.x, lead_goal_pose.pose.orientation.y, lead_goal_pose.pose.orientation.z, lead_goal_pose.pose.orientation.w]
+        follow_goal_orient_vector = [follow_goal_pose.pose.orientation.x, follow_goal_pose.pose.orientation.y, follow_goal_pose.pose.orientation.z, follow_goal_pose.pose.orientation.w]
         delta_pairs = {self.lead_arm_group: lead_goal_delta_vector, self.follow_arm_group: follow_goal_delta_vector}
+        orient_pairs = {self.lead_arm_group: lead_goal_orient_vector, self.follow_arm_group: follow_goal_orient_vector}
         pre_grasp_pose = {self.lead_arm_group: "close", self.follow_arm_group: "open"}
         goal_frames = {self.lead_arm_group: lead_goal_pose.header.frame_id, self.follow_arm_group: follow_goal_pose.header.frame_id}
 
@@ -641,6 +658,7 @@ class TaskPlanner():
         generator.grasp = "close"
         generator.objects = goal_frames
         generator.target_deltas = delta_pairs
+        generator.target_orients = orient_pairs
         generator.setMonitoredStage(grasp["open hand"])
         # generator.setMonitoredStage(grasp["move leader to clip"])
         generator.generate_group = self.follow_arm_group
