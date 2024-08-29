@@ -350,6 +350,7 @@ class TaskPlanner():
             follower_pre_clip_pose = data.mios_plan_request.follower_goal_in_clip
             follower_pre_clip_vec = [follower_pre_clip_pose.pose.position.x, follower_pre_clip_pose.pose.position.y, follower_pre_clip_pose.pose.position.z]
             goal_frame = f"clip{data.mios_plan_request.clip_id}"
+            explr_axis = data.mios_plan_request.explr_axis
             
             msg_to_mios = moveit_msgs.msg.MiosPlanResponse()
             
@@ -371,7 +372,7 @@ class TaskPlanner():
             
             '''Plan'''
             try: 
-                task = self.create_task(goal_frame, leader_pre_clip_pose, follower_pre_clip_pose)
+                task = self.create_task(goal_frame, leader_pre_clip_pose, follower_pre_clip_pose, explr_axis)
                 if task.plan():
                     rospy.logwarn("Executing solution trajectory")
                     # task.publish(task.solutions[0])
@@ -515,9 +516,9 @@ class TaskPlanner():
         '''Spawn IK on Fixed Pose for Dual Arm'''
         # target positions in clip frames
         # lead_goal_pose = create_clip_goal(goal_frame_name, leader_pre_clip)
-        # self.append_frame_markers(lead_goal_pose, "leader_goal_frame")
+        self.append_frame_markers(lead_goal_pose, "leader_goal_frame")
         # follow_goal_pose = create_clip_goal(goal_frame_name, follower_pre_clip)
-        # self.append_frame_markers(follow_goal_pose, "follower_goal_frame")
+        self.append_frame_markers(follow_goal_pose, "follower_goal_frame")
 
         # Create goal delta vectors
         lead_goal_delta_vector = [lead_goal_pose.pose.position.x, lead_goal_pose.pose.position.y, lead_goal_pose.pose.position.z]
@@ -561,7 +562,7 @@ class TaskPlanner():
         cost_with_world = False
         cost_group_property = "group"
         cost_mode = core.TrajectoryCostTerm.Mode.AUTO
-        cl_cost = core.Clearance(cost_with_world, cost_cumulative,cost_group_property, cost_mode)
+        cl_cost = core.Clearance(cost_with_world, cost_cumulative, cost_group_property, cost_mode)
         ik_wrapper.setCostTerm(cl_cost)
         
         grasp.insert(ik_wrapper)
@@ -576,7 +577,7 @@ class TaskPlanner():
         
         return t
     
-    def create_task(self, goal_frame_name, lead_goal_pose, follow_goal_pose, use_constraint=False):
+    def create_task(self, goal_frame_name, lead_goal_pose, follow_goal_pose, explr_axis="y", use_constraint=False):
         t = core.Task()
         t.loadRobotModel()
         
@@ -652,7 +653,7 @@ class TaskPlanner():
         generator = stages.GenerateGraspPoseDual("generate grasp pose dual", ik_groups)
         generator.eefs = ik_endeffectors
         generator.marker_ns = "grasp_pose"
-        generator.explr_axis = "y"
+        generator.explr_axis = explr_axis
         generator.angle_delta = 0.2
         generator.pregrasps = pre_grasp_pose
         generator.grasp = "close"
