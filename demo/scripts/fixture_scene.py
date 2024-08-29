@@ -17,9 +17,48 @@ from utils.global_variables import *
 from utils.mongodb_client import MongoDBClient
 from moveit.task_constructor import core, stages
 import tf
+import tf.transformations as tf_trans
 
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
+
+def quaternion_between_two_vectors(v1, v2):
+    # Normalize the input vectors
+    v1 = v1 / np.linalg.norm(v1)
+    v2 = v2 / np.linalg.norm(v2)
+    
+    # Calculate the cross product (axis of rotation)
+    cross_prod = np.cross(v1, v2)
+    
+    # Calculate the dot product (cosine of the angle)
+    dot_prod = np.dot(v1, v2)
+    
+    # Compute the angle between the vectors
+    angle = np.arccos(dot_prod)
+    
+    # If the vectors are identical (angle is 0), return the identity quaternion
+    if np.isclose(angle, 0.0):
+        return [0.0, 0.0, 0.0, 1.0]
+    
+    # If the vectors are opposite (angle is 180 degrees), we need a special case
+    if np.isclose(angle, np.pi):
+        # Find an orthogonal vector to v1
+        orthogonal_vector = np.array([1, 0, 0]) if not np.isclose(v1[0], 1.0) else np.array([0, 1, 0])
+        rotation_axis = np.cross(v1, orthogonal_vector)
+        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+        return tf_trans.quaternion_about_axis(np.pi, rotation_axis)
+    
+    # Normalize the cross product to get the rotation axis
+    rotation_axis = cross_prod / np.linalg.norm(cross_prod)
+    
+    # Create the quaternion from the rotation axis and angle
+    return tf_trans.quaternion_about_axis(angle, rotation_axis)
+
+def get_holding_orientation(clip_config, default_orientation):
+	# default_orientation = [0.0, 0.9999997, 0.0, 0.0007963]
+	aruco_fixture_transform = quaternion_between_two_vectors(np.array([1,0,0]), np.array(clip_config['x_axis']))
+	transformed_orientation = tf.transformations.quaternion_multiply(aruco_fixture_transform, copy.deepcopy(default_orientation))
+	return transformed_orientation
 
 def rotate_pose_stamped_with_quaternion(pose_stamped, rotation_quaternion):
     # Get current orientation as quaternion from PoseStamped
@@ -45,7 +84,7 @@ def convert_db_to_dict(db_data):
 
 
 class FixtureScene(object):
-    def __init__(self, clip_info_type, clip_info_file, attachment_info):
+    def __init__(self, clip_info_type, clip_info_file, clip_info_num, attachment_info):
         self.scene = PlanningSceneInterface()
         
         # marker publisher
@@ -63,9 +102,10 @@ class FixtureScene(object):
                 self.clip_infos = pickle.load(clip_file)
         elif clip_info_type == "mongodb":
             self.db_client = MongoDBClient()
-            self.clip_data = self.db_client.read("mios_db", "cable_routing_1_clips", {})
-            self.clip_config = self.db_client.read("mios_db", "cable_routing_1_configs", {})
+            self.clip_data = self.db_client.read("mios_db", "cable_routing_"+str(clip_info_num)+"_clips", {})
+            self.clip_config = self.db_client.read("mios_db", "cable_routing_"+str(clip_info_num)+"_configs", {})
             self.clip_infos = convert_db_to_dict(self.clip_data)
+            self.clip_setting = convert_db_to_dict(self.clip_config)
         else:
             rospy.logerr("clip info type is not supported")
             
@@ -317,9 +357,12 @@ class FixtureScene(object):
         # TODO@Kejia: clip type should also be included in clip.pickle
         for clip_number, clip_info in self.clip_infos.items():
             clip_position = clip_info["W"]["center"]
-            current_clip_size = copy.copy(clip_size)
-            current_clip_size[2] = current_clip_size[2] + clip_info["W"]["height"]
-            # clip_size = (0.05, 0.03, 0.04)
+            # current_clip_size = copy.copy(clip_size)
+            # current_clip_size[2] = current_clip_size[2] + clip_info["W"]["height"]
+            # # clip_size = (0.05, 0.03, 0.04)
+            clip_config = self.clip_setting[clip_number]
+            config_clip_size = clip_config["fixture_size"]
+            current_clip_size = np.array(clip_config['x_axis'])*config_clip_size[0] + np.array(clip_config['y_axis'])*config_clip_size[1] + np.array(clip_config['z_axis'])*config_clip_size[2]
             clip_center_position = np.zeros(3)
             clip_center_position[0] = clip_position[0] - 0.02 + current_clip_size[0]/2 # 0.15: distance from fixture center to fixture edge
             clip_center_position[1] = clip_position[1]
@@ -330,12 +373,14 @@ class FixtureScene(object):
             clip_rot_vec_Kp = R.from_rotvec(clip_info["Kp"]["rot_vec"])
             clip_rot_euler_Kp = list(clip_rot_vec_Kp.as_euler('zxy', degrees=True))
             print("kp angles", clip_rot_euler_Kp)
-            clip_rot_euler_W = copy.deepcopy(clip_rot_euler_Kp)
+            clip_rot_euler_W = copy.deepcopy(clip_rot_euler_Kp) # only apply rotation around world z axis
             clip_rot_euler_W[1] = 0
             clip_rot_euler_W[2] = 0
             clip_orientation = R.from_euler('zyx', clip_rot_euler_W, degrees=True)
-            print("quat", list(clip_orientation.as_quat()))
-            self.clips["clip"+str(clip_number)] = {"center": clip_center_position, "size": current_clip_size, "orientation": list(clip_orientation.as_quat())}
+            clip_orientation = get_holding_orientation(clip_config,list(clip_orientation.as_quat()))
+            # print("quat", list(clip_orientation.as_quat()))
+            print("quat", clip_orientation)
+            self.clips["clip"+str(clip_number)] = {"center": clip_center_position, "size": current_clip_size, "orientation": list(clip_orientation)}
             result = self.add_one_fixture("clip"+str(clip_number), clip_center_position, current_clip_size, clip_orientation, expand=False)
             # self.add_fixture_axes("clip"+str(clip_number))
             rospy.loginfo("add clip %s to the scene at %s: %s", str(clip_number), str(clip_center_position), result)            
@@ -347,7 +392,8 @@ class FixtureScene(object):
     def add_one_fixture(self, clip_name, clip_pos, clip_size, clip_orientation, expand=True):
         box_pose = geometry_msgs.msg.PoseStamped()
         
-        quaternion = list(clip_orientation.as_quat())
+        # quaternion = list(clip_orientation.as_quat())
+        quaternion = clip_orientation
         
         if expand:
             clip_size = clip_size + EXPAN
@@ -394,7 +440,8 @@ class FixtureScene(object):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Arguments for fixture scene loading')
     parser.add_argument('-c','--clip_file', default='/home/tp2/Documents/mios-wiring/clip_info_20240710_transform.pickle')
-    parser.add_argument('-f','--data_type', default='pickle')
+    parser.add_argument('-n','--config_num', default=4)
+    parser.add_argument('-f','--data_type', default='mongodb')
     # parser.add_argument('--board_base_size', default='store_true', help='Skip unsetting previous environment variables to extend context')
     # parser.add_argument('--board_size', action='store_true', help='Only consider this prefix path and ignore other prefix path in the environment')
     args = parser.parse_args()
@@ -408,7 +455,7 @@ if __name__ == "__main__":
         not rospy.search_param("robot_description_semantic") and not rospy.is_shutdown()
     ):
         time.sleep(0.5)
-    load_scene = FixtureScene(clip_info_type="mongodb", clip_info_file=args.clip_file, attachment_info=attachment)
+    load_scene = FixtureScene(clip_info_type=args.data_type, clip_info_file=args.clip_file, clip_info_num=args.config_num, attachment_info=attachment)
     
     load_scene.add_qbboard_to_scene(expand=False, edge_pos=[0.18, 0, 1], name="qb_board_base", board_size=BOARD_BASE_SIZE)
     load_scene.add_qbboard_to_scene(expand=True, edge_pos=[0.18, 0, 1+BOARD_BASE_SIZE[2]], name="qb_board", board_size=BOARD_SIZE)
