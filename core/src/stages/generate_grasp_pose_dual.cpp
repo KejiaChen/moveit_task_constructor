@@ -276,10 +276,14 @@ void GenerateGraspPoseDual::compute() {
 				// iterate over genrate group
 				Eigen::Vector3d rotation_axis;
 				get_exploration_axis(rotation_axis);
-				Eigen::Isometry3d target_position(Eigen::Translation3d(transformed_pose_msg.pose.position.x, 
+				Eigen::Isometry3d default_target_pose(Eigen::Translation3d(transformed_pose_msg.pose.position.x, 
 																	   transformed_pose_msg.pose.position.y, 
-																	   transformed_pose_msg.pose.position.z));
-				Eigen::Isometry3d target_pose = target_position * Eigen::AngleAxisd(current_angle, rotation_axis);
+																	   transformed_pose_msg.pose.position.z)*
+												  Eigen::Quaterniond(transformed_pose_msg.pose.orientation.w, 
+																	transformed_pose_msg.pose.orientation.x, 
+																	transformed_pose_msg.pose.orientation.y, 
+																	transformed_pose_msg.pose.orientation.z));
+				Eigen::Isometry3d target_pose = default_target_pose * Eigen::AngleAxisd(current_angle, rotation_axis);
 				current_angle += props.get<double>("angle_delta");
 				target_pose_msg.pose = tf2::toMsg(target_pose);
 			} else {
