@@ -120,6 +120,8 @@ public:
 		    STATISTICS_TOPIC, rclcpp::QoS(1).transient_local());
 		solution_publisher_ = node_->create_publisher<moveit_task_constructor_msgs::msg::Solution>(
 		    SOLUTION_TOPIC, rclcpp::QoS(1).transient_local());
+		trajectory_publisher_ = node_->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+		    "/mtc_joint_trajectory", rclcpp::QoS(1).transient_local());
 
 		get_solution_service_ = node_->create_service<moveit_task_constructor_msgs::srv::GetSolution>(
 		    std::string(GET_SOLUTION_SERVICE "_") + task_id_,
@@ -155,6 +157,8 @@ public:
 	rclcpp::Publisher<moveit_task_constructor_msgs::msg::TaskStatistics>::SharedPtr task_statistics_publisher_;
 	/// publish new solutions
 	rclcpp::Publisher<moveit_task_constructor_msgs::msg::Solution>::SharedPtr solution_publisher_;
+	// publish trajectories
+	rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_publisher_;
 	/// services to provide an individual Solution
 	rclcpp::Service<moveit_task_constructor_msgs::srv::GetSolution>::SharedPtr get_solution_service_;
 	rclcpp::Node::SharedPtr node_;
@@ -199,6 +203,20 @@ void Introspection::publishSolution(const SolutionBase& s) {
 	moveit_task_constructor_msgs::msg::Solution msg;
 	fillSolution(msg, s);
 	impl->solution_publisher_->publish(msg);
+
+	// inspect trajectory
+	for (const moveit_task_constructor_msgs::msg::SubTrajectory& sub_trajectory : msg.sub_trajectory) {
+		if (sub_trajectory.trajectory.joint_trajectory.points.empty())
+			continue;
+		// publish trajectories
+		impl->trajectory_publisher_->publish(sub_trajectory.trajectory.joint_trajectory);
+		RCLCPP_INFO_STREAM(LOGGER, "Published trajectory id " << sub_trajectory.info.id 
+															<< "for stage" << sub_trajectory.info.stage_id
+															<< "with "<< sub_trajectory.trajectory.joint_trajectory.points.size()
+															<< " waypoints");
+
+	}
+
 }
 
 void Introspection::publishAllSolutions(bool wait) {
