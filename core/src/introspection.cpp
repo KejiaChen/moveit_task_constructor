@@ -199,22 +199,25 @@ void Introspection::fillSolution(moveit_task_constructor_msgs::msg::Solution& ms
 	msg.task_id = impl->task_id_;
 }
 
-void Introspection::publishSolution(const SolutionBase& s) {
+void Introspection::publishSolution(const SolutionBase& s, bool publish_for_servo) {
 	moveit_task_constructor_msgs::msg::Solution msg;
 	fillSolution(msg, s);
 	impl->solution_publisher_->publish(msg);
 
-	// inspect trajectory
-	for (const moveit_task_constructor_msgs::msg::SubTrajectory& sub_trajectory : msg.sub_trajectory) {
-		if (sub_trajectory.trajectory.joint_trajectory.points.empty())
-			continue;
-		// publish trajectories
-		impl->trajectory_publisher_->publish(sub_trajectory.trajectory.joint_trajectory);
-		RCLCPP_INFO_STREAM(LOGGER, "Published trajectory id " << sub_trajectory.info.id 
-															<< "for stage" << sub_trajectory.info.stage_id
-															<< "with "<< sub_trajectory.trajectory.joint_trajectory.points.size()
-															<< " waypoints");
+	// publish trajectories for servo
+	if (publish_for_servo){
+		for (const moveit_task_constructor_msgs::msg::SubTrajectory& sub_trajectory : msg.sub_trajectory) {
+			if (sub_trajectory.trajectory.joint_trajectory.points.empty())
+				continue;
+			// publish trajectories
+			impl->trajectory_publisher_->publish(sub_trajectory.trajectory.joint_trajectory);
+			RCLCPP_INFO_STREAM(LOGGER, "Published trajectory id " << sub_trajectory.info.id 
+																<< "for stage" << sub_trajectory.info.stage_id
+																<< "with "<< sub_trajectory.trajectory.joint_trajectory.points.size()
+																<< " waypoints");
+			rclcpp::sleep_for(std::chrono::milliseconds(100));
 
+		}
 	}
 
 }

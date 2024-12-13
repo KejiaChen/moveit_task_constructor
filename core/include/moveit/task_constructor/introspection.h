@@ -90,7 +90,7 @@ public:
 	void registerSolution(const SolutionBase& s);
 
 	/// publish the given solution
-	void publishSolution(const SolutionBase& s);
+	void publishSolution(const SolutionBase& s, bool publish_for_servo=false);
 
 	/// publish all top-level solutions of task
 	void publishAllSolutions(bool wait = true);
