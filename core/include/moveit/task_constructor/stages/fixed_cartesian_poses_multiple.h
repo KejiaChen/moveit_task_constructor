@@ -1,7 +1,7 @@
 /*********************************************************************
  * Software License Agreement (BSD License)
  *
- *  Copyright (c) 2020, Hamburg University
+ *  Copyright (c) 2019, Bielefeld University
  *  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -14,7 +14,7 @@
  *     copyright notice, this list of conditions and the following
  *     disclaimer in the documentation and/or other materials provided
  *     with the distribution.
- *   * Neither the name of the copyright holder nor the names of its
+ *   * Neither the name of Bielefeld University nor the names of its
  *     contributors may be used to endorse or promote products derived
  *     from this software without specific prior written permission.
  *
@@ -32,25 +32,35 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  *********************************************************************/
 
-/* Author: Michael 'v4hn' Goerner
-   Desc:   collective include of primitive stages
+/* Authors: Robert Haschke
+   Desc:    Spawn fixed Cartesian poses
 */
 
 #pragma once
 
-#include "stages/compute_ik.h"
-#include "stages/compute_ik_multiple.h"
-#include "stages/connect.h"
-#include "stages/current_state.h"
-#include "stages/fix_collision_objects.h"
-#include "stages/fixed_cartesian_poses.h"
-#include "stages/fixed_cartesian_poses_multiple.h"
-#include "stages/fixed_state.h"
-#include "stages/generate_grasp_pose.h"
-#include "stages/generate_grasp_pose_dual.h"
-#include "stages/generate_place_pose.h"
-#include "stages/generate_pose.h"
-#include "stages/modify_planning_scene.h"
-#include "stages/move_relative.h"
-#include "stages/move_to.h"
-#include "stages/predicate_filter.h"
+#include <moveit/task_constructor/stage.h>
+#include <moveit/task_constructor/cost_queue.h>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+
+namespace moveit {
+namespace task_constructor {
+namespace stages {
+
+class FixedCartesianPosesMultiple : public MonitoringGenerator
+{
+public:
+	FixedCartesianPosesMultiple(const std::string& name = "generate poses");
+
+	void reset() override;
+	bool canCompute() const override;
+	void compute() override;
+
+	void addPosePair(const std::map<std::string, geometry_msgs::msg::PoseStamped>& pose_pair);
+
+protected:
+	void onNewSolution(const SolutionBase& s) override;
+	ordered<const SolutionBase*> upstream_solutions_;
+};
+}  // namespace stages
+}  // namespace task_constructor
+}  // namespace moveit
