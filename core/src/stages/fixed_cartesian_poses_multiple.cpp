@@ -46,7 +46,7 @@ namespace moveit {
 namespace task_constructor {
 namespace stages {
 
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("FixedCartesianPoses");
+static const rclcpp::Logger LOGGER = rclcpp::get_logger("FixedCartesianPosesMultiple");
 
 using PosePairsList = std::vector<std::map<std::string, geometry_msgs::msg::PoseStamped>>;
 

@@ -53,7 +53,7 @@ namespace moveit {
 namespace task_constructor {
 namespace stages {
 
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("ComputeIK");
+static const rclcpp::Logger LOGGER = rclcpp::get_logger("ComputeIKMultiple");
 
 ComputeIKMultiple::ComputeIKMultiple(const std::string& name, Stage::pointer&& child, const std::vector<std::string>& group_names, const std::string& whole_body_group) : WrapperBase(name, std::move(child)), group_names_(std::move(group_names)), whole_body_group_(whole_body_group){
 	auto& p = properties();
@@ -373,6 +373,7 @@ void ComputeIKMultiple::compute() {
 		// parent link of ik frame
 		// in this case is panda_link7 (panda_link8 is connected to EE thorugh fixed joint)
 		link = scene->getCurrentState().getRigidlyConnectedParentLinkModel(ik_pose_msg.header.frame_id);
+		RCLCPP_INFO_STREAM(LOGGER, "IK frame: " << ik_pose_msg.header.frame_id << " parent link: " << link->getName());
 
 		// transform target pose such that ik frame will reach there if link (panda_link8) does
 		// get the desired flange pose when desired EE pose is reached
