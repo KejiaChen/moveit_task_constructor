@@ -20,6 +20,7 @@ add_library(${PROJECT_NAME}_stages SHARED
 	${PROJECT_INCLUDE}/stages/connect.h
 	${PROJECT_INCLUDE}/stages/move_to.h
 	${PROJECT_INCLUDE}/stages/move_relative.h
+	${PROJECT_INCLUDE}/stages/move_relative_multiple.h
 
 	${PROJECT_INCLUDE}/stages/simple_grasp.h
 	${PROJECT_INCLUDE}/stages/pick.h
@@ -44,6 +45,7 @@ add_library(${PROJECT_NAME}_stages SHARED
 	connect.cpp
 	move_to.cpp
 	move_relative.cpp
+	move_relative_multiple.cpp
 
 	simple_grasp.cpp
 	pick.cpp
