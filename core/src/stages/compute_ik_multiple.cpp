@@ -116,26 +116,45 @@ namespace {
 // ??? TODO: provide callback methods in PlanningScene class / probably not very useful here though...
 // TODO: move into MoveIt core, lift active_components_only_ from fcl to common interface
 bool isTargetPoseCollidingInEEF(const planning_scene::PlanningSceneConstPtr& scene,
-                                moveit::core::RobotState& robot_state, Eigen::Isometry3d pose,
-                                const moveit::core::LinkModel* link, const moveit::core::JointModelGroup* jmg = nullptr,
+                                moveit::core::RobotState& robot_state, 
+								EigenSTL::vector_Isometry3d& poses,
+                                std::vector<const moveit::core::LinkModel*>& links,
+								const moveit::core::JointModelGroup* jmg = nullptr,
                                 collision_detection::CollisionResult* collision_result = nullptr) {
+	if (poses.size() != links.size())
+    {
+        RCLCPP_ERROR(LOGGER, "The number of poses does not match the number of links.");
+        return false;
+    }
+	
+	for (size_t i = 0; i < links.size(); ++i)
+    {
+	const moveit::core::LinkModel* link = links[i];
+    Eigen::Isometry3d& pose = poses[i];
+	
 	// consider all rigidly connected parent links as well
-	// TODO@KejiaChen: does this include only single arm or dual arms?
 	const moveit::core::LinkModel* parent = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link);
-	if (parent != link)  // transform pose into pose suitable to place parent
-		pose = pose * robot_state.getGlobalLinkTransform(link).inverse() * robot_state.getGlobalLinkTransform(parent);
+	Eigen::Isometry3d transformed_pose = pose;
+	if (parent != link)  
+		// ensure that the collision check considers the entire rigidly connected structure of the end-effector, not just the specified link
+		transformed_pose = pose * robot_state.getGlobalLinkTransform(link).inverse() * robot_state.getGlobalLinkTransform(parent);
 
 	// place links at given pose
-	robot_state.updateStateWithLinkAt(parent, pose);
+	robot_state.updateStateWithLinkAt(parent, transformed_pose);
+	}
+
 	robot_state.updateCollisionBodyTransforms();
 
 	// disable collision checking for parent links (except links fixed to root)
 	auto acm = scene->getAllowedCollisionMatrix();
+	for (size_t i = 0; i < links.size(); ++i){
 	std::vector<const std::string*> pending_links;  // parent link names that might be rigidly connected to root
+	const moveit::core::LinkModel* link = links[i];
+	const moveit::core::LinkModel* parent = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link);
 	while (parent) {
 		pending_links.push_back(&parent->getName());
-		link = parent;
-		const moveit::core::JointModel* joint = link->getParentJointModel();
+		auto link_ = parent;
+		const moveit::core::JointModel* joint = link_->getParentJointModel();
 		parent = joint->getParentLinkModel();
 
 		if (joint->getType() != moveit::core::JointModel::FIXED) { //except links fixed to root
@@ -143,6 +162,7 @@ bool isTargetPoseCollidingInEEF(const planning_scene::PlanningSceneConstPtr& sce
 				acm.setDefaultEntry(*name, true);
 			pending_links.clear();
 		}
+	}
 	}
 
 	// check collision with the world using the padded version
@@ -300,7 +320,8 @@ void ComputeIKMultiple::compute() {
 	
 	// vectors to store multiple poses and tips for non-chain IK
 	EigenSTL::vector_Isometry3d multiple_target_pose;
-	std::vector<std::string> multiple_tips;
+	std::vector<std::string> multiple_tip_names;
+	std::vector<const moveit::core::LinkModel*> multiple_tip_links;
 
 	// bring some declarations out of the loop
 	std::deque<visualization_msgs::msg::Marker> frame_markers;
@@ -308,7 +329,7 @@ void ComputeIKMultiple::compute() {
 	std::vector<double> compare_pose;
 	moveit::core::RobotState sandbox_state{ scene->getCurrentState() };
 
-	// compute IK for each robot
+	// compute IK for each robot in loops
 	for (auto& group_name : group_names_) {
 	// std::string group_name = group_names[0];
 	if (!validateEEF(props, robot_model, eef_jmg, &msg, group_name)) {
@@ -382,7 +403,24 @@ void ComputeIKMultiple::compute() {
 
 	// add target pose and tip into vector
 	multiple_target_pose.push_back(target_pose);
-	multiple_tips.push_back(link->getName());
+	multiple_tip_links.push_back(link);
+	multiple_tip_names.push_back(link->getName());
+
+	// frames at target pose and ik frame
+	rviz_marker_tools::appendFrame(frame_markers, target_pose_msg, 0.1, "target frame");
+	rviz_marker_tools::appendFrame(frame_markers, ik_pose_msg, 0.1, "ik frame");
+
+	// loop end here for single joint group
+	}
+
+	// Dual joint group
+	if (!(jmg = robot_model->getJointModelGroup(whole_body_group_))) {
+			std::string* msg;
+			if (msg)
+				*msg = "Unknown group: " + whole_body_group_;
+			RCLCPP_WARN_STREAM(LOGGER, *msg);
+	}
+	RCLCPP_WARN(LOGGER, "Check target poses collision for joint model group: %s", jmg->getName().c_str());
 
 	// validate placed link for collisions
 	// only check EE link, i.e. links after panda_link8
@@ -390,23 +428,28 @@ void ComputeIKMultiple::compute() {
 	// moveit::core::RobotState sandbox_state{ scene->getCurrentState() };
 	//TODO@KejiaChen: Set EE poses at one time for collision checking 
 	bool colliding =
-	    !ignore_collisions && isTargetPoseCollidingInEEF(scene, sandbox_state, target_pose, link, jmg, &collisions);
+	    !ignore_collisions && isTargetPoseCollidingInEEF(scene, sandbox_state, multiple_target_pose, multiple_tip_links, jmg, &collisions);
 
-	// frames at target pose and ik frame
-	// std::deque<visualization_msgs::msg::Marker> frame_markers;
-	rviz_marker_tools::appendFrame(frame_markers, target_pose_msg, 0.1, "target frame");
-	rviz_marker_tools::appendFrame(frame_markers, ik_pose_msg, 0.1, "ik frame");
-	// end-effector markers
-	// std::deque<visualization_msgs::msg::Marker> eef_markers;
-	// visualize placed end-effector
+	// // frames at target pose and ik frame
+	// rviz_marker_tools::appendFrame(frame_markers, target_pose_msg, 0.1, "target frame");
+	// rviz_marker_tools::appendFrame(frame_markers, ik_pose_msg, 0.1, "ik frame");
+
+	// end-effector markers: visualize placed end-effector
 	auto appender = [&eef_markers](visualization_msgs::msg::Marker& marker, const std::string& /*name*/) {
 		marker.ns = "ik target";
 		marker.color.a *= 0.5;
 		eef_markers.push_back(marker);
 	};
-	const auto& links_to_visualize = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link)
-	                                     ->getParentJointModel()
-	                                     ->getDescendantLinkModels();
+	// const auto& links_to_visualize = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link)
+	//                                      ->getParentJointModel()
+	//                                      ->getDescendantLinkModels();
+	std::vector<const moveit::core::LinkModel*> links_to_visualize;
+	for (const auto& tip_link : multiple_tip_links) {
+		const auto& parent_joint_model = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(tip_link)->getParentJointModel();
+		const auto& descendant_links = parent_joint_model->getDescendantLinkModels();
+		links_to_visualize.insert(links_to_visualize.end(), descendant_links.begin(), descendant_links.end());
+	}
+
 	if (colliding) {
 		SubTrajectory solution;
 		std::copy(frame_markers.begin(), frame_markers.end(), std::back_inserter(solution.markers()));
@@ -439,17 +482,17 @@ void ComputeIKMultiple::compute() {
 	// }
 	// ROS_WARN_STREAM("]");	
 	
-	// loop end here for single joint group
-	}
+	// // loop end here for single joint group
+	// }
 
-	
-	// Dual joint group
-	if (!(jmg = robot_model->getJointModelGroup(whole_body_group_))) {
-			std::string* msg;
-			if (msg)
-				*msg = "Unknown group: " + whole_body_group_;
-			RCLCPP_WARN_STREAM(LOGGER, *msg);
-	}
+
+	// // Dual joint group
+	// if (!(jmg = robot_model->getJointModelGroup(whole_body_group_))) {
+	// 		std::string* msg;
+	// 		if (msg)
+	// 			*msg = "Unknown group: " + whole_body_group_;
+	// 		RCLCPP_WARN_STREAM(LOGGER, *msg);
+	// }
 	// CHECK name of jmg
 	RCLCPP_WARN(LOGGER, "IK solution group name: %s", jmg->getName().c_str());
 
@@ -507,7 +550,7 @@ void ComputeIKMultiple::compute() {
 		// Notice: this is the main IK call
 		// this only represenets whether we can set joint position to achieve this target_pose by computing IK
 		// bool succeeded = sandbox_state.setFromIK(jmg, target_pose, link->getName(), remaining_time, is_valid);
-		bool succeeded = sandbox_state.setFromIK(jmg, multiple_target_pose, multiple_tips, remaining_time, is_valid);
+		bool succeeded = sandbox_state.setFromIK(jmg, multiple_target_pose, multiple_tip_names, remaining_time, is_valid);
 
 		auto now = std::chrono::steady_clock::now();
 		remaining_time -= std::chrono::duration<double>(now - start_time).count();
