@@ -38,6 +38,10 @@
 
 #include <moveit/task_constructor/stages/move_relative_multiple.h>
 #include <moveit/task_constructor/cost_terms.h>
+#include <moveit/task_constructor/merge.h>
+#include <moveit/trajectory_processing/time_optimal_trajectory_generation.h>
+#include <moveit/task_constructor/fmt_p.h>
+// #include <moveit/trajectory_processing/time_parameterization.h>
 
 #include <moveit/planning_scene/planning_scene.h>
 #include <rviz_marker_tools/marker_creation.h>
@@ -60,7 +64,7 @@ MoveRelativeMultiple::MoveRelativeMultiple(const std::string& name, const GroupP
 	auto& p = properties();
 	p.property("timeout").setDefaultValue(1.0);
 	p.declare<std::vector<std::string>>("groups", "name of planning groups");
-	p.declare<geometry_msgs::msg::PoseStamped>("ik_frame", "frame to be moved in Cartesian direction");
+	p.declare<GroupPoseDict>("ik_frames", "frame to be moved towards goal pose");
 
 	p.declare<boost::any>("direction", "motion specification");
 	// register actual types
@@ -71,13 +75,21 @@ MoveRelativeMultiple::MoveRelativeMultiple(const std::string& name, const GroupP
 
 	p.declare<moveit_msgs::msg::Constraints>("path_constraints", moveit_msgs::msg::Constraints(),
 	                                         "constraints to maintain during trajectory");
+
+	// p.declare<trajectory_processing::TimeParameterizationPtr>("merge_time_parameterization",
+	// 	std::make_shared<trajectory_processing::TimeOptimalTrajectoryGeneration>());
 }
 
-void MoveRelativeMultiple::setIKFrame(const Eigen::Isometry3d& pose, const std::string& link) {
-	geometry_msgs::msg::PoseStamped pose_msg;
-	pose_msg.header.frame_id = link;
-	pose_msg.pose = tf2::toMsg(pose);
-	setIKFrame(pose_msg);
+void MoveRelativeMultiple::setIKFrame(std::map<std::string, Eigen::Isometry3d>& poses, GroupStringDict& links) {
+	GroupPoseDict pose_msgs;
+	for (const GroupPlannerVector::value_type& pair : planner_) {
+		geometry_msgs::msg::PoseStamped pose_msg;
+		std::string group = pair.first;
+		pose_msg.header.frame_id = links[group];
+		pose_msg.pose = tf2::toMsg(poses[group]);
+		pose_msgs[group] = pose_msg;
+	}
+	setIKFrame(pose_msgs);
 }
 
 void MoveRelativeMultiple::init(const moveit::core::RobotModelConstPtr& robot_model) {
@@ -111,6 +123,7 @@ void MoveRelativeMultiple::init(const moveit::core::RobotModelConstPtr& robot_mo
 
 static bool getJointStateFromOffset(const boost::any& direction, const Interface::Direction dir,
                                     const moveit::core::JointModelGroup* jmg, moveit::core::RobotState& robot_state) {
+	RCLCPP_INFO_STREAM(LOGGER, "try to get joint state from offset");
 	try {
 		const auto& accepted = jmg->getActiveJointModels();
 		const auto& joints = boost::any_cast<std::map<std::string, double>>(direction);
@@ -209,10 +222,13 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 	// 	return false;
 	// }
 	boost::any direction = props.get("direction");
+	RCLCPP_INFO_STREAM(LOGGER, "Direction type: " << direction.type().name());
 	if (direction.empty()) {
 		solution.markAsFailure("undefined direction");
 		return false;
 	}
+
+	GroupPoseDict ik_frames = props.get<GroupPoseDict>("ik_frames");
 
 	double max_distance = props.get<double>("max_distance");
 	double min_distance = props.get<double>("min_distance");
@@ -224,11 +240,15 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 	const auto& path_constraints = props.get<moveit_msgs::msg::Constraints>("path_constraints");
 
 	// robot_trajectory::RobotTrajectoryPtr robot_trajectory;
-	bool success = false;
-	std::string comment = "";
+	robot_trajectory::RobotTrajectoryPtr combined_trajectory =
+        std::make_shared<robot_trajectory::RobotTrajectory>(robot_model, "");
+    bool overall_success = true;
+    std::string overall_comment;
+	std::vector<PlannerIdTrajectoryPair> overall_trajectories;
 
-	for (const GroupPlannerVector::value_type& pair : planner_) {
+	for (const GroupPlannerVector::value_type& pair : planner_) {	
 		std::string group = pair.first;
+		RCLCPP_INFO_STREAM(LOGGER, "Planning for group: " << group);
 		
 		jmg = robot_model->getJointModelGroup(group);
 		if (!jmg) {
@@ -236,8 +256,11 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			return false;
 		}
 	
+        robot_trajectory::RobotTrajectoryPtr robot_trajectory;
+        bool success = false;
+        std::string comment = "";
+
 		// check if we have a joint-space target
-		robot_trajectory::RobotTrajectoryPtr robot_trajectory;
 		if (getJointStateFromOffset(direction, dir, jmg, scene->getCurrentStateNonConst())) {
 			// plan to joint-space target
 			auto result = pair.second->plan(state.scene(), scene, jmg, timeout, robot_trajectory, path_constraints);
@@ -246,12 +269,16 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 				comment = result.message;
 			solution.setPlannerId(pair.second->getPlannerId());
 		} else {
+			RCLCPP_INFO_STREAM(LOGGER, "Cartesian target");
 			// Cartesian targets require an IK reference frame
 			const moveit::core::LinkModel* link;
 			std::string error_msg;
 			Eigen::Isometry3d ik_pose_world;
 
-			if (!utils::getRobotTipForFrame(props.property("ik_frame"), *scene, jmg, error_msg, link, ik_pose_world)) {
+			geometry_msgs::msg::PoseStamped ik_frame = ik_frames[group];
+			Property ik_frame_property;
+			ik_frame_property.setValue(ik_frame);
+			if (!utils::getRobotTipForFrame(ik_frame_property, *scene, jmg, error_msg, link, ik_pose_world)) {
 				solution.markAsFailure(error_msg);
 				return false;
 			}
@@ -262,6 +289,7 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			double linear_norm = 0.0, angular_norm = 0.0;
 			Eigen::Isometry3d target_eigen;
 
+			RCLCPP_INFO_STREAM(LOGGER, "Try to extract Twist");
 			try {  // try to extract Twist
 				const geometry_msgs::msg::TwistStamped& target = boost::any_cast<geometry_msgs::msg::TwistStamped>(direction);
 				const Eigen::Isometry3d& frame_pose = scene->getFrameTransform(target.header.frame_id);
@@ -305,6 +333,7 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			} catch (const boost::bad_any_cast&) { /* continue with Vector */
 			}
 
+			RCLCPP_INFO_STREAM(LOGGER, "Try to extract Vector");
 			try {  // try to extract Vector
 				const geometry_msgs::msg::Vector3Stamped& target =
 					boost::any_cast<geometry_msgs::msg::Vector3Stamped>(direction);
@@ -360,12 +389,16 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 					if (!success) {
 						char msg[100];
 						snprintf(msg, sizeof(msg), "min_distance not reached (%.3g < %.3g)", distance, min_distance);
-						solution.setComment(msg);
-					}
+						// solution.setComment(msg);
+						comment = msg;
+						// break; // Don't break, but continue for twist or other types of commands
 				} else if (min_distance == 0.0) {  // if min_distance is zero, we succeed in any case
 					success = true;
-				} else if (!success)
-					solution.setComment("failed to move full distance");
+				} else if (!success){
+					// solution.setComment("failed to move full distance");
+					comment = "failed to move full distance";
+					// break;
+				}
 
 				// visualize plan
 				auto ns = props.get<std::string>("marker_ns");
@@ -376,20 +409,100 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			}
 		}
 
+		if (!success) {
+			overall_success = false;
+			overall_comment += "Failed to plan for group " + group + ": " + comment + "\n";
+			break;
+		}
+
 		// store result
 		if (robot_trajectory && robot_trajectory->getWayPointCount() > 0) {
 			scene->setCurrentState(robot_trajectory->getLastWayPoint());
 			if (dir == Interface::BACKWARD)
 				robot_trajectory->reverse();
-			solution.setTrajectory(robot_trajectory);
+			combined_trajectory->append(*robot_trajectory, 0.0);  // Append this arm's trajectory to the combined trajectory
+			// overall_trajectories.push_back({ pair.second->getPlannerId(), robot_trajectory });
+		// 	solution.setTrajectory(robot_trajectory);
 
-			if (!success)
-				solution.markAsFailure(comment);
-			return true;
+		// 	if (!success)
+		// 		solution.markAsFailure(comment);
+		// 	return true;
 		}
+	}
+	}
+	// loop for single arm ends here
+
+	if (combined_trajectory->getWayPointCount() > 0) {
+		// combine trajectory for all arms
+
+		solution.setTrajectory(combined_trajectory);
+	} else {
+		solution.markAsFailure(overall_comment.empty() ? "No valid trajectories were generated" : overall_comment);
 		return false;
 	}
+
+	// solution = *merge(overall_trajectories, state.scene(), state.scene()->getCurrentState());
+
+	if (!overall_success) {
+        solution.markAsFailure(overall_comment);
+        return false;
+    }
+
+	return true;
 }
+
+// SubTrajectoryPtr MoveRelativeMultiple::merge(const std::vector<PlannerIdTrajectoryPair>& sub_trajectories,
+//                                              const planning_scene::PlanningSceneConstPtr& current_scene,
+//                                              const moveit::core::RobotState& initial_state) {
+//     // If there is only one sub-trajectory, return it directly
+//     if (sub_trajectories.size() == 1) {
+//         return std::make_shared<SubTrajectory>(sub_trajectories.at(0).trajectory, 0.0, std::string(""),
+//                                                sub_trajectories.at(0).planner_id);
+//     }
+
+//     // Prepare for merging
+//     std::string combined_planner_ids;
+//     std::vector<robot_trajectory::RobotTrajectoryConstPtr> trajectories_to_merge;
+//     trajectories_to_merge.reserve(sub_trajectories.size());
+
+//     for (size_t i = 0; i < sub_trajectories.size(); ++i) {
+//         trajectories_to_merge.push_back(sub_trajectories[i].trajectory);
+//         if (i > 0) combined_planner_ids += ", ";
+//         combined_planner_ids += sub_trajectories[i].planner_id;
+//     }
+
+//     // Ensure the merged joint model group is valid
+//     auto merged_joint_model_group = merged_jmg_.get();
+//     if (!merged_joint_model_group) {
+//         RCLCPP_ERROR(LOGGER, "Merged Joint Model Group is not defined for MoveRelativeMultiple");
+//         return SubTrajectoryPtr();
+//     }
+
+//     // Retrieve time parameterization for merging
+//     auto timing = properties().get<trajectory_processing::TimeParameterizationPtr>("merge_time_parameterization");
+
+//     // Merge the trajectories
+//     robot_trajectory::RobotTrajectoryPtr merged_trajectory = task_constructor::merge(trajectories_to_merge,
+//                                                                                      initial_state,
+//                                                                                      merged_joint_model_group,
+//                                                                                      *timing);
+//     if (!merged_trajectory) {
+//         RCLCPP_ERROR(LOGGER, "Failed to merge trajectories");
+//         return SubTrajectoryPtr();
+//     }
+
+//     // Validate the merged trajectory for collisions
+//     if (!current_scene->isPathValid(*merged_trajectory,
+//                                     properties().get<moveit_msgs::msg::Constraints>("path_constraints"))) {
+//         RCLCPP_ERROR(LOGGER, "Merged trajectory is in collision");
+//         return SubTrajectoryPtr();
+//     }
+
+//     // Return the merged trajectory as a SubTrajectory
+//     return std::make_shared<SubTrajectory>(merged_trajectory, 0.0, "Merged trajectory", combined_planner_ids);
+// }
+
+
 
 }  // namespace stages
 }  // namespace task_constructor

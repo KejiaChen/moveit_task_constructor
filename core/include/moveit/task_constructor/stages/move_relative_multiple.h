@@ -54,26 +54,34 @@ namespace task_constructor {
 namespace stages {
 
 /** Perform a Cartesian motion relative to some link */
+using GroupPoseDict = std::map<std::string, geometry_msgs::msg::PoseStamped>;
+using GroupStringDict = std::map<std::string, std::string>;
 class MoveRelativeMultiple : public PropagatingEitherWay
 {
 public:
+	struct PlannerIdTrajectoryPair
+	{
+		std::string planner_id;
+		robot_trajectory::RobotTrajectoryConstPtr trajectory;
+	};
+
     using GroupPlannerVector = std::vector<std::pair<std::string, solvers::PlannerInterfacePtr>>;
 	MoveRelativeMultiple(const std::string& name = "move relative",
 	             const GroupPlannerVector& planners = {});
 
 	void init(const moveit::core::RobotModelConstPtr& robot_model) override;
 
-	void setGroup(const std::string& group) { setProperty("group", group); }
+	void setGroup(const std::vector<std::string>& groups) { setProperty("groups", groups); }
 	/// setters for IK frame
-	void setIKFrame(const geometry_msgs::msg::PoseStamped& pose) { setProperty("ik_frame", pose); }
-	void setIKFrame(const Eigen::Isometry3d& pose, const std::string& link);
+	void setIKFrame(GroupPoseDict& poses) { setProperty("ik_frames", poses); }
+	void setIKFrame(std::map<std::string, Eigen::Isometry3d>& poses, GroupStringDict& links);
 	template <typename T>
-	void setIKFrame(const T& p, const std::string& link) {
-		Eigen::Isometry3d pose;
-		pose = p;
-		setIKFrame(pose, link);
+	void setIKFrame(std::map<std::string,T>& p, GroupStringDict& links) {
+		std::map<std::string, Eigen::Isometry3d> poses;
+		poses = p;
+		setIKFrame(poses, links);
 	}
-	void setIKFrame(const std::string& link) { setIKFrame(Eigen::Isometry3d::Identity(), link); }
+	// void setIKFrame(const std::string& link) { setIKFrame(Eigen::Isometry3d::Identity(), link); }
 
 	/// set minimum / maximum distance to move
 	void setMinDistance(double distance) { setProperty("min_distance", distance); }
@@ -98,9 +106,14 @@ protected:
 	// return false if trajectory shouldn't be stored
 	bool compute(const InterfaceState& state, planning_scene::PlanningScenePtr& scene, SubTrajectory& trajectory,
 	             Interface::Direction dir) override;
+	
+	SubTrajectoryPtr merge(const std::vector<PlannerIdTrajectoryPair>& sub_trajectories,
+                           const planning_scene::PlanningSceneConstPtr& current_scene,
+                           const moveit::core::RobotState& initial_state);
 
 protected:
 	GroupPlannerVector planner_;
+	moveit::core::JointModelGroupPtr merged_jmg_;
 };
 }  // namespace stages
 }  // namespace task_constructor
