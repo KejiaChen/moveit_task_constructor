@@ -139,7 +139,7 @@ void MoveRelativeMultiple::init(const moveit::core::RobotModelConstPtr& robot_mo
 
 static bool getJointStateFromOffset(const boost::any& direction, const Interface::Direction dir,
                                     const moveit::core::JointModelGroup* jmg, moveit::core::RobotState& robot_state) {
-	RCLCPP_INFO_STREAM(LOGGER, "try to get joint state from offset");
+	// RCLCPP_INFO_STREAM(LOGGER, "try to get joint state from offset");
 	try {
 		const auto& accepted = jmg->getActiveJointModels();
 		const auto& joints = boost::any_cast<std::map<std::string, double>>(direction);
@@ -386,6 +386,7 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			success = bool(result);
 			if (!success)
 				comment = result.message;
+				RCLCPP_INFO_STREAM(LOGGER, "Planning failed for group " << group << ": " << comment);
 			solution.setPlannerId(pair.second->getPlannerId());
 
 			if (robot_trajectory && robot_trajectory->getWayPointCount() > 0) {  // the following requires a robot_trajectory
@@ -424,8 +425,8 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 					visualizePlan(solution.markers(), dir, success, ns, scene->getPlanningFrame(), ik_pose_world, reached_pose,
 								linear, distance);
 				}
+				}
 			}
-		}
 
 		if (!success) {
 			overall_success = false;
@@ -450,6 +451,7 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			if (dir == Interface::BACKWARD)
 				robot_trajectory->reverse();
 			
+			RCLCPP_INFO_STREAM(LOGGER, "Trajectory for group " << group << " has " << robot_trajectory->getWayPointCount() << " waypoints.");
 			overall_trajectories.push_back({ pair.second->getPlannerId(), robot_trajectory });
 		// 	solution.setTrajectory(robot_trajectory);
 
@@ -462,37 +464,37 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 	// loop for single arm ends here
 
 	
-	if (dir == Interface::BACKWARD){
-		// iterate in a reverse order to append the trajectories in the correct order
-		for (auto it = overall_trajectories.rbegin(); it != overall_trajectories.rend(); ++it) {
-			combined_trajectory->append(*it->trajectory, 0.0);
-		}
-	}else{
-		for (const auto& trajectory : overall_trajectories) {
-			combined_trajectory->append(*trajectory.trajectory, 0.0);
-		}
-	}
+	// if (dir == Interface::BACKWARD){
+	// 	// iterate in a reverse order to append the trajectories in the correct order
+	// 	for (auto it = overall_trajectories.rbegin(); it != overall_trajectories.rend(); ++it) {
+	// 		combined_trajectory->append(*it->trajectory, 0.0);
+	// 	}
+	// }else{
+	// 	for (const auto& trajectory : overall_trajectories) {
+	// 		combined_trajectory->append(*trajectory.trajectory, 0.0);
+	// 	}
+	// }
 
-	if (combined_trajectory->getWayPointCount() > 0) {
-		// combine trajectory for all arms
-		solution.setTrajectory(combined_trajectory);
-		// solution.setTrajectory(overall_trajectories);
-	} else {
-		solution.markAsFailure(overall_comment.empty() ? "No valid trajectories were generated" : overall_comment);
-		return false;
-	}
+	// if (combined_trajectory->getWayPointCount() > 0) {
+	// 	// combine trajectory for all arms
+	// 	solution.setTrajectory(combined_trajectory);
+	// 	// solution.setTrajectory(overall_trajectories);
+	// } else {
+	// 	solution.markAsFailure(overall_comment.empty() ? "No valid trajectories were generated" : overall_comment);
+	// 	return false;
+	// }
 
-	// solution = *merge(overall_trajectories, state.scene(), state.scene()->getCurrentState());
+	if (!overall_success) {
+        solution.markAsFailure(overall_comment);
+        return false;
+    }
 
 	// Ensure both arms' states are updated
 	scene->setCurrentState(temp_state);
 	scene->getCurrentStateNonConst().update();
 	// RCLCPP_INFO_STREAM(LOGGER, "State after MoveRelativeMultiple:\n" << getStatePositionsString(scene->getCurrentState()));
 
-	if (!overall_success) {
-        solution.markAsFailure(overall_comment);
-        return false;
-    }
+	solution = *merge(overall_trajectories, state.scene(), state.scene()->getCurrentState());
 
 	return true;
 }
@@ -543,6 +545,9 @@ SubTrajectoryPtr MoveRelativeMultiple::merge(const std::vector<PlannerIdTrajecto
         RCLCPP_ERROR(LOGGER, "Merged trajectory is in collision");
         return SubTrajectoryPtr();
     }
+
+	RCLCPP_INFO_STREAM(LOGGER, "Merged trajectory has " << merged_trajectory->getWayPointCount() << " waypoints.");
+	RCLCPP_INFO_STREAM(LOGGER, "Total duration of merged trajectory: " << merged_trajectory->getDuration());
 
     // Return the merged trajectory as a SubTrajectory
     return std::make_shared<SubTrajectory>(merged_trajectory, 0.0, "Merged trajectory", combined_planner_ids);
