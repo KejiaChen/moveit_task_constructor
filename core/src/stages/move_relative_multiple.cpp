@@ -260,11 +260,26 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 	// robot_trajectory::RobotTrajectoryPtr robot_trajectory;
 	robot_trajectory::RobotTrajectoryPtr combined_trajectory =
         std::make_shared<robot_trajectory::RobotTrajectory>(robot_model, "");
-    bool overall_success = true;
+    bool overall_success;
     std::string overall_comment;
 	std::vector<PlannerIdTrajectoryPair> overall_trajectories;
 
-	for (const GroupPlannerVector::value_type& pair : planner_) {	
+	// Different orders of planners result in different planning results
+	// Create permutations of the planner pairs
+    std::vector<GroupPlannerVector> planner_permutations = {planner_, planner_};
+    std::reverse(planner_permutations[1].begin(), planner_permutations[1].end());
+
+	for (const auto& planner_variant : planner_permutations) {
+		overall_success = true;
+        overall_trajectories.clear();
+        overall_comment.clear();
+
+		RCLCPP_INFO_STREAM(LOGGER, "Planning with planner variant order:");
+		for (const auto& pair : planner_variant) {
+			RCLCPP_INFO_STREAM(LOGGER, pair.first);
+		}
+
+	for (const GroupPlannerVector::value_type& pair : planner_variant) {	
 		std::string group = pair.first;
 		RCLCPP_INFO_STREAM(LOGGER, "Planning for group: " << group);
 		
@@ -307,8 +322,8 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			double linear_norm = 0.0, angular_norm = 0.0;
 			Eigen::Isometry3d target_eigen;
 
-			RCLCPP_INFO_STREAM(LOGGER, "Try to extract Twist");
 			try {  // try to extract Twist
+				RCLCPP_INFO_STREAM(LOGGER, "Try to extract Twist");
 				const geometry_msgs::msg::TwistStamped& target = boost::any_cast<geometry_msgs::msg::TwistStamped>(direction);
 				const Eigen::Isometry3d& frame_pose = scene->getFrameTransform(target.header.frame_id);
 				tf2::fromMsg(target.twist.linear, linear);
@@ -351,8 +366,8 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			} catch (const boost::bad_any_cast&) { /* continue with Vector */
 			}
 
-			RCLCPP_INFO_STREAM(LOGGER, "Try to extract Vector");
 			try {  // try to extract Vector
+				RCLCPP_INFO_STREAM(LOGGER, "Try to extract Vector");
 				const geometry_msgs::msg::Vector3Stamped& target =
 					boost::any_cast<geometry_msgs::msg::Vector3Stamped>(direction);
 				const Eigen::Isometry3d& frame_pose = scene->getFrameTransform(target.header.frame_id);
@@ -378,17 +393,20 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			}
 
 		COMPUTE:
+		{
 			// offset from link to ik_frame
 			const Eigen::Isometry3d& offset = scene->getCurrentState().getGlobalLinkTransform(link).inverse() * ik_pose_world;
 
 			auto result =
 				pair.second->plan(scene, *link, offset, target_eigen, jmg, timeout, robot_trajectory, path_constraints);
+			RCLCPP_INFO_STREAM(LOGGER, "Planning result: " << std::boolalpha << bool(result));
 			success = bool(result);
-			if (!success)
+			if (!success){
 				comment = result.message;
 				RCLCPP_INFO_STREAM(LOGGER, "Planning failed for group " << group << ": " << comment);
+				// break;
+			}else{
 			solution.setPlannerId(pair.second->getPlannerId());
-
 			if (robot_trajectory && robot_trajectory->getWayPointCount() > 0) {  // the following requires a robot_trajectory
 																				// returned from planning
 				moveit::core::RobotStatePtr& reached_state = robot_trajectory->getLastWayPointPtr();
@@ -427,11 +445,15 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 				}
 				}
 			}
+			}
+		} // COMPUTE block ends here
 
 		if (!success) {
 			overall_success = false;
-			overall_comment += "Failed to plan for group " + group + ": " + comment + "\n";
-			break;
+			RCLCPP_INFO_STREAM(LOGGER, "Planning for this variant failed");
+			// overall_comment += "Failed to plan for group " + group + ": " + comment + "\n";
+			// break;
+		}
 		}
 
 		// store result
@@ -460,9 +482,15 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 		// 	return true;
 		}
 	}
-	}
 	// loop for single arm ends here
 
+	RCLCPP_INFO_STREAM(LOGGER, "Final value of overall_success for this variant: " << std::boolalpha << overall_success);
+	if (overall_success) {
+		RCLCPP_INFO_STREAM(LOGGER, "Planning successful");
+		break; // skip the other permutations
+	}
+	}
+	// loop for single permutation ends here
 	
 	// if (dir == Interface::BACKWARD){
 	// 	// iterate in a reverse order to append the trajectories in the correct order
