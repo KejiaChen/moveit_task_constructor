@@ -52,5 +52,7 @@
 #include "stages/generate_pose.h"
 #include "stages/modify_planning_scene.h"
 #include "stages/move_relative.h"
+#include "stages/move_relative_multiple.h"
 #include "stages/move_to.h"
 #include "stages/predicate_filter.h"
+#include "stages/cartesian_waypoints.h"
