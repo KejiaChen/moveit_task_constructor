@@ -18,6 +18,7 @@ add_library(${PROJECT_NAME}_stages SHARED
 	${PROJECT_INCLUDE}/stages/predicate_filter.h
 
 	${PROJECT_INCLUDE}/stages/connect.h
+	${PROJECT_INCLUDE}/stages/connect_master_follower.h
 	${PROJECT_INCLUDE}/stages/move_to.h
 	${PROJECT_INCLUDE}/stages/move_relative.h
 	${PROJECT_INCLUDE}/stages/move_relative_multiple.h
@@ -44,6 +45,7 @@ add_library(${PROJECT_NAME}_stages SHARED
 	predicate_filter.cpp
 
 	connect.cpp
+	connect_master_follower.cpp
 	move_to.cpp
 	move_relative.cpp
 	move_relative_multiple.cpp
