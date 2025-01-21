@@ -94,21 +94,18 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
     }
 
     // Update the leader arm's state in the intermediate scene
-    // Update only the leader arm's joints
+    // Update only the leader arm's joints in the intermediate scene
     const moveit::core::JointModelGroup* leader_jmg = leader_trajectory->getGroup();
+    RCLCPP_INFO_STREAM(LOGGER, "leader group name: " << leader_jmg->getName());
     const moveit::core::RobotState& leader_final_state = leader_trajectory->getLastWayPoint();
     std::vector<double> leader_joint_positions;
     leader_final_state.copyJointGroupPositions(leader_jmg, leader_joint_positions);
     intermediate_state.setJointGroupPositions(leader_jmg, leader_joint_positions);
-    // Update the rest of the robot state (e.g., follower arm) remains unchanged
-    intermediate_state.update();
-
-    intermediate_scene->setCurrentState(intermediate_state);
-	intermediate_scene->getCurrentStateNonConst().update();
+    intermediate_state.update();  // Ensure consistency
 
     // Step 2: Compute trajectory for the second arm based on the first arm's Cartesian trajectory
     // planning_scene::PlanningScenePtr final_scene = intermediate_scene->diff();
-    RCLCPP_INFO_STREAM(LOGGER, "Intermediate scene created");
+    RCLCPP_INFO_STREAM(LOGGER, "Intermediate scene update");
     if (!computeSecondArmTrajectory(leader_trajectory, from, to, follower_trajectory, intermediate_scene)) {
         auto failed_solution = std::make_shared<SubTrajectory>();
         failed_solution->markAsFailure("Follower arm trajectory planning failed.");
@@ -117,6 +114,7 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
     }
 
     // Combine trajectories into a valid dual-arm solution
+    RCLCPP_INFO_STREAM(LOGGER, "Combining leader and follower arm trajectories");
     robot_trajectory::RobotTrajectoryPtr dual_arm_trajectory =
         std::make_shared<robot_trajectory::RobotTrajectory>(intermediate_scene->getRobotModel(), merged_jmg_.get());
     dual_arm_trajectory->append(*leader_trajectory, 0.0);
@@ -144,6 +142,18 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
   const moveit::core::RobotState& final_goal_state = to.scene()->getCurrentState();
   planning_scene::PlanningScenePtr final_scene = intermediate_scene->diff();
 
+//   // validate the updated state
+//   moveit::core::RobotState intermediate_state = final_scene->getCurrentStateNonConst();
+//   const std::string leader_ee_link = "right_panda_hand";
+//   if (intermediate_state.knowsFrameTransform(leader_ee_link)) {
+//       Eigen::Isometry3d ee_transform = intermediate_state.getGlobalLinkTransform(leader_ee_link);
+//       RCLCPP_INFO_STREAM(LOGGER, "Leader arm end-effector pose in intermediate_scene: "
+//                             << "Position: " << ee_transform.translation().transpose()
+//                             << ", Orientation (quaternion): " << Eigen::Quaterniond(ee_transform.rotation()).coeffs().transpose());
+//   } else {
+//       RCLCPP_ERROR_STREAM(LOGGER, "End-effector link '" << leader_ee_link << "' not found in the updated state.");
+//   }
+
   RCLCPP_INFO_STREAM(LOGGER, "Computing trajectory for the second arm");
   // Define the transform from the "leader_ee_link" to the actual end-effector frame
   Eigen::Isometry3d lead_grasp_frame_transform = Eigen::Isometry3d::Identity();
@@ -151,6 +161,7 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
   
   // Extract the Cartesian trajectory of the first arm
   std::vector<geometry_msgs::msg::Pose> leader_cartesian_trajectory;
+  geometry_msgs::msg::Pose leader_start_hand_pose;
   for (size_t i = 0; i < leader_trajectory->getWayPointCount(); ++i) {
     const auto& point = leader_trajectory->getWayPoint(i);
     // Get the pose of the "leader_ee_link" in the world frame
@@ -163,12 +174,15 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
         return false;
     }
     Eigen::Isometry3d ee_link_pose = point.getGlobalLinkTransform(leader_ee_link);
+    if (i == 0) {
+      tf2::convert(ee_link_pose, leader_start_hand_pose);
+    }
     // Apply the transform to get the pose of the actual end-effector
-    Eigen::Isometry3d end_effector_pose = ee_link_pose * lead_grasp_frame_transform;
+    Eigen::Isometry3d tip_pose = ee_link_pose * lead_grasp_frame_transform;
 
     // Convert to geometry_msgs::Pose
     geometry_msgs::msg::Pose pose;
-    tf2::convert(end_effector_pose, pose);
+    tf2::convert(tip_pose, pose);
     leader_cartesian_trajectory.push_back(pose);
   }
 
@@ -189,20 +203,26 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
       moveit::core::RobotState& goal_state = end->getCurrentStateNonConst();
 
       // Set the goal pose for the second arm's end effector
-      geometry_msgs::msg::Pose leader_start_pose = leader_cartesian_trajectory.front();
       Eigen::Quaterniond follower_start_orientation(start_state.getGlobalLinkTransform("left_panda_hand").rotation());
-      tf2::convert(follower_start_orientation, leader_start_pose.orientation);
+    //   tf2::convert(follower_start_orientation, leader_start_tip_pose.orientation);
 
-      Eigen::Isometry3d follower_start_transform;
-      tf2::fromMsg(leader_start_pose, follower_start_transform);
-      goal_state.setFromIK(jmg, follower_start_transform, "left_panda_hand");
+      Eigen::Isometry3d follower_hand_goal_pose;
+      tf2::fromMsg(leader_start_hand_pose, follower_hand_goal_pose);
+      goal_state.setFromIK(jmg, follower_hand_goal_pose, "left_panda_hand");
 
-      // Validate goal state
-      RCLCPP_INFO_STREAM(LOGGER, "Follower arm goal state position: " << follower_start_transform.translation().transpose()
-                                << " orientation: " << Eigen::Quaterniond(follower_start_transform.rotation()).coeffs().transpose());
+      RCLCPP_INFO_STREAM(LOGGER, "Follower arm goal state position: " << follower_hand_goal_pose.translation().transpose()
+                                << " orientation: " << Eigen::Quaterniond(follower_hand_goal_pose.rotation()).coeffs().transpose());
+
+    //   // Validate goal state
+    //   std::vector<double> follower_joint_positions;
+    //   goal_state.copyJointGroupPositions(jmg, follower_joint_positions);
+
+    //   RCLCPP_INFO_STREAM(LOGGER, "Follower arm goal state joint positions: " << follower_joint_positions[0] << ", " << follower_joint_positions[1] << ", " 
+    //                             << follower_joint_positions[2] << ", " << follower_joint_positions[3] << ", " << follower_joint_positions[4] 
+    //                             << ", " << follower_joint_positions[5] << ", " << follower_joint_positions[6]);
 
       // Plan trajectory
-      auto result = pair.second->plan(from.scene(), end, jmg, props.get<double>("timeout"), to_start_trajectory);
+      auto result = pair.second->plan(start, end, jmg, props.get<double>("timeout"), to_start_trajectory);
       success = bool(result);
 
       if (!success) {
@@ -217,33 +237,33 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
   }
 
   /* Step 2: Follow the first arm's trajectory with a 0.01m offset in EE frame*/
-  std::vector<geometry_msgs::msg::Pose> follower_cartesian_trajectory;
-  for (const auto& pose : leader_cartesian_trajectory) {
-    // Adjust the pose to create the offset
-    Eigen::Isometry3d original_pose;
-    tf2::fromMsg(pose, original_pose);
+//   std::vector<geometry_msgs::msg::Pose> follower_cartesian_trajectory;
+//   for (const auto& pose : leader_cartesian_trajectory) {
+//     // Adjust the pose to create the offset
+//     Eigen::Isometry3d original_pose;
+//     tf2::fromMsg(pose, original_pose);
 
-    // Define the offset in the ee frame
-    Eigen::Vector3d offset_ee(-0.1, 0.0, 0.0);  // 0.1m offset along the X-axis of the ee frame
-    // Transform the offset to the world frame
-    Eigen::Vector3d offset_world = original_pose.rotation() * offset_ee;
-    // Apply the transformed offset to the original pose
-    Eigen::Isometry3d offset_pose = original_pose;
-    offset_pose.translation() += offset_world;
+//     // Define the offset in the ee frame
+//     Eigen::Vector3d offset_ee(-0.1, 0.0, 0.0);  // 0.1m offset along the X-axis of the ee frame
+//     // Transform the offset to the world frame
+//     Eigen::Vector3d offset_world = original_pose.rotation() * offset_ee;
+//     // Apply the transformed offset to the original pose
+//     Eigen::Isometry3d offset_pose = original_pose;
+//     offset_pose.translation() += offset_world;
 
-    geometry_msgs::msg::Pose adjusted_pose;
-    tf2::convert(offset_pose, adjusted_pose);
-    follower_cartesian_trajectory.push_back(adjusted_pose);
-  }
+//     geometry_msgs::msg::Pose adjusted_pose;
+//     tf2::convert(offset_pose, adjusted_pose);
+//     follower_cartesian_trajectory.push_back(adjusted_pose);
+//   }
 
-  moveit_msgs::msg::RobotTrajectory follow_trajectory;
-  double fraction_follow = move_group_follow_->computeCartesianPath(
-      follower_cartesian_trajectory, 0.01, 0.0, follow_trajectory, true);
+//   moveit_msgs::msg::RobotTrajectory follow_trajectory;
+//   double fraction_follow = move_group_follow_->computeCartesianPath(
+//       follower_cartesian_trajectory, 0.01, 0.0, follow_trajectory, true);
 
-  if (fraction_follow < 1.0) {
-    RCLCPP_WARN(LOGGER, "Follower arm failed to follow the first arm's trajectory. Fraction: %f", fraction_follow);
-    return false;
-  }
+//   if (fraction_follow < 1.0) {
+//     RCLCPP_WARN(LOGGER, "Follower arm failed to follow the first arm's trajectory. Fraction: %f", fraction_follow);
+//     return false;
+//   }
 
   // Combine the trajectories of two steps
   follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(
@@ -252,9 +272,10 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
   to_start_trajectory->getRobotTrajectoryMsg(to_start_trajectory_msg);
   follower_trajectory->setRobotTrajectoryMsg(final_scene->getCurrentState(), to_start_trajectory_msg);
 
-  robot_trajectory::RobotTrajectory follow_robot_trajectory(final_scene->getRobotModel(), final_scene->getRobotModel()->getJointModelGroup("follower"));
-  follow_robot_trajectory.setRobotTrajectoryMsg(final_scene->getCurrentState(), follow_trajectory);
-  follower_trajectory->append(follow_robot_trajectory, 0.0);
+//   robot_trajectory::RobotTrajectory follow_robot_trajectory(final_scene->getRobotModel(), final_scene->getRobotModel()->getJointModelGroup("follower"));
+//   follow_robot_trajectory.setRobotTrajectoryMsg(final_scene->getCurrentState(), follow_trajectory);
+//   follower_trajectory->append(follow_robot_trajectory, 0.0);
+
 
   return true;
 }
