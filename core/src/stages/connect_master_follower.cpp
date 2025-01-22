@@ -42,6 +42,8 @@
 #include <moveit/planning_scene/planning_scene.h>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <tf2_eigen/tf2_eigen.hpp>
+#include <moveit/trajectory_processing/iterative_time_parameterization.h>
+#include <moveit/trajectory_processing/ruckig_traj_smoothing.h>
 
 
 
@@ -210,7 +212,7 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
       double distance_from_start  = (tip_pose.translation() - leader_start_tip_pose.translation()).norm();
       // Instead of strating from the first pose, start from the closest to the current pose of the follower arm
       if (distance_from_start < start_offset) {
-        RCLCPP_WARN(LOGGER, "Distance from the starting point is too narrow: %f", distance_from_start);
+        // RCLCPP_WARN(LOGGER, "Distance from the starting point is too narrow: %f", distance_from_start);
         continue;
       }
     }
@@ -234,13 +236,15 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
 
   // Obtain the Cartesian path for the follower from the leader's Cartesian path
   std::vector<geometry_msgs::msg::Pose> follower_tip_path;
+  std::vector<geometry_msgs::msg::Pose> follower_hand_path;
+
   Eigen::Isometry3d follower_hand_start_pose;
 
   // Define the transform from the tip frame to "follower_ee_link"
   Eigen::Isometry3d follow_hand_frame_transform = Eigen::Isometry3d::Identity();
   follow_hand_frame_transform.translation().z() = -0.1034;  // Offset along the Z-axis
 
-  for (size_t i = 0; i < leader_tip_trajectory.size(); ++i) {
+  for (size_t i = 0; i < leader_tip_trajectory.size()-20; ++i) {
     const auto& pose_msg = leader_tip_trajectory[i];
     Eigen::Isometry3d original_pose;
     tf2::fromMsg(pose_msg, original_pose);
@@ -252,18 +256,25 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
     Eigen::Isometry3d offset_pose = original_pose;
     offset_pose.translation() += offset_world;
 
-    // TODO: Set the orientation 
+    // TODO@Kejia: Set the orientation 
     // Eigen::Quaterniond follower_orientation(final_goal_state.getGlobalLinkTransform("left_panda_hand").rotation());
     // offset_pose.linear() = follower_orientation.toRotationMatrix();
 
+    // pose at hand
+    Eigen::Isometry3d hand_offset_pose = offset_pose*follow_hand_frame_transform;
     geometry_msgs::msg::Pose adjusted_pose;
-    tf2::convert(offset_pose, adjusted_pose);
-    follower_tip_path.push_back(adjusted_pose);
+    tf2::convert(hand_offset_pose, adjusted_pose);
+    follower_hand_path.push_back(adjusted_pose);
 
     if (i == 0){
-        follower_hand_start_pose = offset_pose*follow_hand_frame_transform;
+        follower_hand_start_pose = hand_offset_pose;
     }
   }
+
+  // Test follower_tip_path;
+  // std::vector<geometry_msgs::msg::Pose> test_follower_hand_path;
+  // test_follower_hand_path.push_back(follower_hand_path[0]);
+  // test_follower_hand_path.push_back(follower_hand_path[follower_hand_path.size()-20]);
 
   /********************************************************************/
   /*** Step 1: Move second arm to the first arm's starting position ***/
@@ -329,47 +340,49 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
     RCLCPP_INFO_STREAM(LOGGER, "Follower arm state updated in intermediate_scene.");
   }
 
-//   /*********************************************************************************/
-//   /*** Step 2: Follow the first arm's trajectory with an offset in EE frame ***/
-//   /*********************************************************************************/
-//   move_group_follow_->setPoseReferenceFrame("world");
-//   move_group_follow_->setStartState(intermediate_scene->getCurrentState());
+  /*********************************************************************************/
+  /*** Step 2: Follow the first arm's trajectory with an offset in EE frame ***/
+  /*********************************************************************************/
+  move_group_follow_->setPoseReferenceFrame("world");
+  move_group_follow_->setStartState(intermediate_scene->getCurrentState());
 
-//   // compute joint trajectory from the cartesian path
-//   moveit_msgs::msg::RobotTrajectory follow_trajectory_msg;
-//   double fraction_follow = move_group_follow_->computeCartesianPath(
-//       follower_tip_path, 0.01, 0.0, follow_trajectory_msg, true);
+  auto follow_scene = intermediate_scene->diff();
 
-//   robot_trajectory::RobotTrajectoryPtr follow_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(
-//       final_scene->getRobotModel(), final_scene->getRobotModel()->getJointModelGroup(props.get<std::string>("follow_group")));
-//   follow_trajectory->setRobotTrajectoryMsg(final_scene->getCurrentState(), follow_trajectory_msg);
+  // compute joint trajectory from the cartesian path
+  moveit_msgs::msg::RobotTrajectory follow_trajectory_msg;
+  double fraction_follow = move_group_follow_->computeCartesianPath(
+      follower_hand_path, 0.01, 0.0, follow_trajectory_msg, true);
 
-//   if (fraction_follow < 1.0) {
-//     RCLCPP_WARN(LOGGER, "Follower arm failed to follow the first arm's trajectory. Fraction: %f", fraction_follow);
-//     return false;
-//   }else{
-//     RCLCPP_INFO(LOGGER, "Follower arm successfully followed the first arm's cartesian path.");
+  robot_trajectory::RobotTrajectoryPtr follow_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(
+      follow_scene->getRobotModel(), follow_scene->getRobotModel()->getJointModelGroup(props.get<std::string>("follow_group")));
+  follow_trajectory->setRobotTrajectoryMsg(follow_scene->getCurrentState(), follow_trajectory_msg);
 
-//     // Update intermediate scene
-//     const moveit::core::JointModelGroup* follow_jmg = follow_trajectory->getGroup();
-//     const moveit::core::RobotState& follower_final_state = follow_trajectory->getLastWayPoint();
-//     std::vector<double> follower_joint_positions;
-//     follower_final_state.copyJointGroupPositions(follow_jmg, follower_joint_positions);
+  if (fraction_follow < 1.0) {
+    RCLCPP_WARN(LOGGER, "Follower arm failed to follow the first arm's trajectory. Fraction: %f", fraction_follow);
+    return false;
+  }else{
+    RCLCPP_INFO(LOGGER, "Follower arm successfully followed the first arm's cartesian path.");
 
-//     moveit::core::RobotState& state = intermediate_scene->getCurrentStateNonConst();
-//     state.setJointGroupPositions(follow_jmg, follower_joint_positions);
-//     state.update();  // Ensure consistency
+    // Update intermediate scene
+    const moveit::core::JointModelGroup* follow_jmg = follow_trajectory->getGroup();
+    const moveit::core::RobotState& follower_final_state = follow_trajectory->getLastWayPoint();
+    std::vector<double> follower_joint_positions;
+    follower_final_state.copyJointGroupPositions(follow_jmg, follower_joint_positions);
 
-//     RCLCPP_INFO_STREAM(LOGGER, "Follower arm state updated in intermediate_scene.");
-//   }
+    moveit::core::RobotState& state = intermediate_scene->getCurrentStateNonConst();
+    state.setJointGroupPositions(follow_jmg, follower_joint_positions);
+    state.update();  // Ensure consistency
 
- /*****************************************/
- /*** Step 3: Connect to the 'to' scene ***/
- /*****************************************/
- // Plan joint trajectory for the follower arm
- robot_trajectory::RobotTrajectoryPtr to_end_trajectory;
+    RCLCPP_INFO_STREAM(LOGGER, "Follower arm state updated in intermediate_scene.");
+  }
 
- for (const auto& pair : planner_) {
+  /*****************************************/
+  /*** Step 3: Connect to the 'to' scene ***/
+  /*****************************************/
+  // Plan joint trajectory for the follower arm
+  robot_trajectory::RobotTrajectoryPtr to_end_trajectory;
+
+  for (const auto& pair : planner_) {
     if (pair.first == props.get<std::string>("follow_group")) {
     planning_scene::PlanningSceneConstPtr start = intermediate_scene;
     // const moveit::core::JointModelGroup* jmg = final_goal_state.getJointModelGroup(pair.first);
@@ -395,12 +408,31 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
     
     // return true;
     }
- }
+  }
 
- // Combine the trajectories of two steps
- follower_trajectory = to_start_trajectory;
-//  follower_trajectory->append(*follow_trajectory, 0.01);
- follower_trajectory->append(*to_end_trajectory, 0.01);
+  // Combine the trajectories of two steps
+  follower_trajectory = to_start_trajectory;
+  follower_trajectory->append(*follow_trajectory, 0.0);
+  follower_trajectory->append(*to_end_trajectory, 0.0);
+
+  // Smoothing
+
+  // Perform time parameterization for velocity consistency
+  // trajectory_processing::IterativeParabolicTimeParameterization time_param;
+
+  // if (!time_param.computeTimeStamps(*follower_trajectory)) {
+  //     RCLCPP_ERROR(LOGGER, "Time parameterization failed for the follower arm's trajectory.");
+  //     return false;
+  // }
+
+  trajectory_processing::RuckigSmoothing ruckig_smoother;
+    
+  // Apply Ruckig smoothing to the trajectory
+  if (!ruckig_smoother.applySmoothing(*follower_trajectory)) {
+      RCLCPP_ERROR(LOGGER, "Ruckig smoothing failed to smooth trajectory.");
+  } else {
+      RCLCPP_INFO(LOGGER, "Ruckig smoothing successfully applied.");
+  }
 
   return true;
 }
