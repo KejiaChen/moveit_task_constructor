@@ -82,7 +82,7 @@ private:
                                   planning_scene::PlanningScenePtr& intermediate_scene);
 
   bool computeSecondArmTrajectory(const robot_trajectory::RobotTrajectoryPtr& first_arm_trajectory,
-                                   const InterfaceState& from, const InterfaceState& to,
+                                   const InterfaceState& to,
                                    robot_trajectory::RobotTrajectoryPtr& second_arm_trajectory,
                                    planning_scene::PlanningScenePtr& final_scene);
 
