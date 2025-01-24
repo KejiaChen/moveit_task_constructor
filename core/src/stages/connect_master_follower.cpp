@@ -150,41 +150,15 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
 	connect(from, to, solution);
 }
 
-bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
-                                                const InterfaceState& to,
-                                                robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
-                                                planning_scene::PlanningScenePtr& intermediate_scene) {
-
-  const auto& props = properties();
-  const moveit::core::RobotState& initial_state = intermediate_scene->getCurrentState();
-  const moveit::core::RobotState& final_goal_state = to.scene()->getCurrentState();
-  const moveit::core::JointModelGroup* follow_jmg;
-
-  Eigen::Quaterniond follower_initial_orientation(initial_state.getGlobalLinkTransform("left_panda_hand").rotation());
-
-  double start_offset = 0.15;
-  double track_offset = 0.1;
-
-//   // validate the updated state
-//   moveit::core::RobotState intermediate_state = final_scene->getCurrentStateNonConst();
-//   const std::string leader_ee_link = "right_panda_hand";
-//   if (intermediate_state.knowsFrameTransform(leader_ee_link)) {
-//       Eigen::Isometry3d ee_transform = intermediate_state.getGlobalLinkTransform(leader_ee_link);
-//       RCLCPP_INFO_STREAM(LOGGER, "Leader arm end-effector pose in intermediate_scene: "
-//                             << "Position: " << ee_transform.translation().transpose()
-//                             << ", Orientation (quaternion): " << Eigen::Quaterniond(ee_transform.rotation()).coeffs().transpose());
-//   } else {
-//       RCLCPP_ERROR_STREAM(LOGGER, "End-effector link '" << leader_ee_link << "' not found in the updated state.");
-//   }
-
-  RCLCPP_INFO_STREAM(LOGGER, "Computing trajectory for the second arm");
-
+bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
+                                                   const moveit::core::RobotState& final_goal_state,
+                                                   std::vector<geometry_msgs::msg::Pose>& leader_tip_trajectory,
+                                                   double start_offset) {
   // Define the transform from the "leader_ee_link" to the actual end-effector frame
   Eigen::Isometry3d lead_grasp_frame_transform = Eigen::Isometry3d::Identity();
   lead_grasp_frame_transform.translation().z() = 0.1034;  // Offset along the Z-axis
   
-  /* Extract the Cartesian trajectory of the first arm */ 
-  std::vector<geometry_msgs::msg::Pose> leader_tip_trajectory;
+  // std::vector<geometry_msgs::msg::Pose> leader_tip_trajectory;
   geometry_msgs::msg::Pose leader_start_hand_pose_msg;
   Eigen::Isometry3d leader_start_tip_pose;
 
@@ -229,6 +203,50 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
 
   if (leader_tip_trajectory.empty()) {
     RCLCPP_ERROR(LOGGER, "Leader arm trajectory is empty.");
+    return false;
+  }
+
+  return true;
+}
+
+bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
+                                                const InterfaceState& to,
+                                                robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
+                                                planning_scene::PlanningScenePtr& intermediate_scene) {
+
+  const auto& props = properties();
+  const moveit::core::RobotState& initial_state = intermediate_scene->getCurrentState();
+  const moveit::core::RobotState& final_goal_state = to.scene()->getCurrentState();
+  const moveit::core::JointModelGroup* follow_jmg;
+
+  Eigen::Quaterniond follower_initial_orientation(initial_state.getGlobalLinkTransform("left_panda_hand").rotation());
+
+  double start_offset = 0.15;
+  double track_offset = 0.1;
+
+//   // validate the updated state
+//   moveit::core::RobotState intermediate_state = final_scene->getCurrentStateNonConst();
+//   const std::string leader_ee_link = "right_panda_hand";
+//   if (intermediate_state.knowsFrameTransform(leader_ee_link)) {
+//       Eigen::Isometry3d ee_transform = intermediate_state.getGlobalLinkTransform(leader_ee_link);
+//       RCLCPP_INFO_STREAM(LOGGER, "Leader arm end-effector pose in intermediate_scene: "
+//                             << "Position: " << ee_transform.translation().transpose()
+//                             << ", Orientation (quaternion): " << Eigen::Quaterniond(ee_transform.rotation()).coeffs().transpose());
+//   } else {
+//       RCLCPP_ERROR_STREAM(LOGGER, "End-effector link '" << leader_ee_link << "' not found in the updated state.");
+//   }
+
+  RCLCPP_INFO_STREAM(LOGGER, "Computing trajectory for the second arm");
+
+  // Define the transform from the "leader_ee_link" to the actual end-effector frame
+  Eigen::Isometry3d lead_grasp_frame_transform = Eigen::Isometry3d::Identity();
+  lead_grasp_frame_transform.translation().z() = 0.1034;  // Offset along the Z-axis
+
+  /* Extract the Cartesian trajectory of the first arm */ 
+  std::vector<geometry_msgs::msg::Pose> leader_tip_trajectory;
+  
+  if (!ExtractFirstArmCartesianTrajectory(leader_trajectory, final_goal_state, leader_tip_trajectory, start_offset)) {
+    RCLCPP_INFO_STREAM(LOGGER, "Failed to extract leader arm Cartesian trajectory.");
     return false;
   }
 
@@ -280,38 +298,38 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
     Eigen::Isometry3d follow_hand_pose = follow_tip_pose*follow_hand_frame_transform;
 
     if (i == 0){;
-      // follower_start_orientation = Eigen::Quaterniond(follow_hand_pose.rotation());
+      follower_start_orientation = Eigen::Quaterniond(follow_hand_pose.rotation());
       
-      // // Extract the rotation components
-      // Eigen::Matrix3d initial_rotation_matrix = follower_initial_orientation.toRotationMatrix();
-      // Eigen::Matrix3d start_rotation_matrix = follower_start_orientation.toRotationMatrix();
+      // Extract the rotation components
+      Eigen::Matrix3d initial_rotation_matrix = follower_initial_orientation.toRotationMatrix();
+      Eigen::Matrix3d start_rotation_matrix = follower_start_orientation.toRotationMatrix();
 
-      // // Extract Euler angles (Roll, Pitch, Yaw) from the matrices
-      // Eigen::Vector3d initial_euler_angles = initial_rotation_matrix.eulerAngles(0, 1, 2);  // XYZ convention
-      // Eigen::Vector3d start_euler_angles = start_rotation_matrix.eulerAngles(0, 1, 2);
+      // Extract Euler angles (Roll, Pitch, Yaw) from the matrices
+      Eigen::Vector3d initial_euler_angles = initial_rotation_matrix.eulerAngles(0, 1, 2);  // XYZ convention
+      Eigen::Vector3d start_euler_angles = start_rotation_matrix.eulerAngles(0, 1, 2);
 
-      // // Extract roll (X) and pitch (Y) from the initial orientation
-      // double initial_roll = initial_euler_angles[0];
-      // double initial_pitch = initial_euler_angles[1];
-      // // Extract yaw (Z) from the start orientation
-      // double start_yaw = start_euler_angles[2];
+      // Extract roll (X) and pitch (Y) from the initial orientation
+      double initial_roll = initial_euler_angles[0];
+      double initial_pitch = initial_euler_angles[1];
+      // Extract yaw (Z) from the start orientation
+      double start_yaw = start_euler_angles[2];
 
-      // // Create a combined rotation with roll and pitch from the initial orientation and yaw from the start orientation
-      // Eigen::Quaterniond combined_orientation =
-      //     Eigen::AngleAxisd(initial_roll, Eigen::Vector3d::UnitX()) *
-      //     Eigen::AngleAxisd(initial_pitch, Eigen::Vector3d::UnitY()) *
-      //     Eigen::AngleAxisd(start_yaw, Eigen::Vector3d::UnitZ());
+      // Create a combined rotation with roll and pitch from the initial orientation and yaw from the start orientation
+      Eigen::Quaterniond combined_orientation =
+          Eigen::AngleAxisd(initial_roll, Eigen::Vector3d::UnitX()) *
+          Eigen::AngleAxisd(initial_pitch, Eigen::Vector3d::UnitY()) *
+          Eigen::AngleAxisd(start_yaw, Eigen::Vector3d::UnitZ());
 
-      // // Set the follower's start orientation
-      // follow_hand_pose.linear() = combined_orientation.toRotationMatrix();
-      // follow_tip_pose.linear() = combined_orientation.toRotationMatrix();
+      // Set the follower's start orientation
+      follow_hand_pose.linear() = combined_orientation.toRotationMatrix();
+      follow_tip_pose.linear() = combined_orientation.toRotationMatrix();
 
-      follow_hand_pose.linear() = follower_final_orientation.toRotationMatrix();
-      follow_tip_pose.linear() = follower_final_orientation.toRotationMatrix();
+      // follow_hand_pose.linear() = follower_final_orientation.toRotationMatrix();
+      // follow_tip_pose.linear() = follower_final_orientation.toRotationMatrix();
 
       follower_hand_start_pose = follow_hand_pose;
       
-      RCLCPP_INFO_STREAM(LOGGER, "Follower arm start orientation: " << follower_final_orientation.coeffs().transpose());
+      // RCLCPP_INFO_STREAM(LOGGER, "Follower arm start orientation: " << follower_final_orientation.coeffs().transpose());
     }
 
     geometry_msgs::msg::Pose adjusted_tip_pose;
@@ -330,6 +348,8 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
   Eigen::Quaterniond last_orientation(last_pose_transformed.rotation());
   RCLCPP_INFO_STREAM(LOGGER, "Follower arm last orientation: " << last_orientation.coeffs().transpose());
 
+  visual_tools_.publishPath(follower_tip_path, rviz_visual_tools::YELLOW, rviz_visual_tools::MEDIUM);
+  visual_tools_.trigger();
 
   /********************************************************************/
   /*** Step 1: Move second arm to the first arm's starting position ***/

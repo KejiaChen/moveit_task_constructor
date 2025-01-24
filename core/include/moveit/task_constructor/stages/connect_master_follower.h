@@ -89,6 +89,11 @@ private:
                                    robot_trajectory::RobotTrajectoryPtr& second_arm_trajectory,
                                    planning_scene::PlanningScenePtr& final_scene);
 
+  bool ExtractFirstArmCartesianTrajectory(const robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
+                                          const moveit::core::RobotState& final_goal_state,
+                                          std::vector<geometry_msgs::msg::Pose>& leader_tip_trajectory,
+                                          double start_offset);
+
   moveit::planning_interface::MoveGroupInterfacePtr move_group_follow_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
 };
