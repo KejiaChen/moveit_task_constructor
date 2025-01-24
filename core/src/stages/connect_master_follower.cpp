@@ -55,8 +55,10 @@ namespace stages {
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("ConnectMF");
 
-ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners, const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow) 
-    : Connect(name, planners), move_group_follow_(move_group_follow){
+ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners, 
+                    const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow,
+                    moveit_visual_tools::MoveItVisualTools visual_tools) 
+    : Connect(name, planners), move_group_follow_(move_group_follow), visual_tools_(visual_tools){
 	// setTimeout(1.0);
 	// setCostTerm(std::make_unique<cost::PathLength>());
 
@@ -71,6 +73,7 @@ ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners
     p.declare<std::string>("lead_group", "right_panda_arm", "Group name of the leader.");
     p.declare<std::string>("follow_group", "left_panda_arm", "Group name of the follower.");
     p.declare<GroupStringDict>("eefs", "vector of names of end-effector group");
+
 }
 
 void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
@@ -261,7 +264,15 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
     if (i > 0){
       follower_start_orientation.normalize();
       follower_final_orientation.normalize();
-      follow_tip_pose.linear() = follower_start_orientation.slerp(percentage, follower_final_orientation).toRotationMatrix();
+
+      // if (follower_start_orientation.dot(follower_final_orientation) < 0.0) {
+      //     follower_final_orientation.coeffs() = -follower_final_orientation.coeffs();
+      // }
+
+      Eigen::Quaterniond interpolated_orientation = follower_start_orientation.slerp(percentage, follower_final_orientation);
+      // interpolated_orientation.normalize();
+      follow_tip_pose.linear() = interpolated_orientation.toRotationMatrix();
+
       // RCLCPP_INFO_STREAM(LOGGER, "Follower arm orientation at " << percentage << ": " << Eigen::Quaterniond(follow_tip_pose.rotation()).coeffs().transpose());
     }
 
@@ -269,38 +280,47 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
     Eigen::Isometry3d follow_hand_pose = follow_tip_pose*follow_hand_frame_transform;
 
     if (i == 0){;
-      follower_start_orientation = Eigen::Quaterniond(follow_hand_pose.rotation());
+      // follower_start_orientation = Eigen::Quaterniond(follow_hand_pose.rotation());
       
-      // Extract the rotation components
-      Eigen::Matrix3d initial_rotation_matrix = follower_initial_orientation.toRotationMatrix();
-      Eigen::Matrix3d start_rotation_matrix = follower_start_orientation.toRotationMatrix();
+      // // Extract the rotation components
+      // Eigen::Matrix3d initial_rotation_matrix = follower_initial_orientation.toRotationMatrix();
+      // Eigen::Matrix3d start_rotation_matrix = follower_start_orientation.toRotationMatrix();
 
-      // Extract Euler angles (Roll, Pitch, Yaw) from the matrices
-      Eigen::Vector3d initial_euler_angles = initial_rotation_matrix.eulerAngles(0, 1, 2);  // XYZ convention
-      Eigen::Vector3d start_euler_angles = start_rotation_matrix.eulerAngles(0, 1, 2);
+      // // Extract Euler angles (Roll, Pitch, Yaw) from the matrices
+      // Eigen::Vector3d initial_euler_angles = initial_rotation_matrix.eulerAngles(0, 1, 2);  // XYZ convention
+      // Eigen::Vector3d start_euler_angles = start_rotation_matrix.eulerAngles(0, 1, 2);
 
-      // Extract roll (X) and pitch (Y) from the initial orientation
-      double initial_roll = initial_euler_angles[0];
-      double initial_pitch = initial_euler_angles[1];
-      // Extract yaw (Z) from the start orientation
-      double start_yaw = start_euler_angles[2];
+      // // Extract roll (X) and pitch (Y) from the initial orientation
+      // double initial_roll = initial_euler_angles[0];
+      // double initial_pitch = initial_euler_angles[1];
+      // // Extract yaw (Z) from the start orientation
+      // double start_yaw = start_euler_angles[2];
 
-      // Create a combined rotation with roll and pitch from the initial orientation and yaw from the start orientation
-      Eigen::Quaterniond combined_orientation =
-          Eigen::AngleAxisd(initial_roll, Eigen::Vector3d::UnitX()) *
-          Eigen::AngleAxisd(initial_pitch, Eigen::Vector3d::UnitY()) *
-          Eigen::AngleAxisd(start_yaw, Eigen::Vector3d::UnitZ());
+      // // Create a combined rotation with roll and pitch from the initial orientation and yaw from the start orientation
+      // Eigen::Quaterniond combined_orientation =
+      //     Eigen::AngleAxisd(initial_roll, Eigen::Vector3d::UnitX()) *
+      //     Eigen::AngleAxisd(initial_pitch, Eigen::Vector3d::UnitY()) *
+      //     Eigen::AngleAxisd(start_yaw, Eigen::Vector3d::UnitZ());
 
-      // Set the follower's start orientation
-      follow_hand_pose.linear() = combined_orientation.toRotationMatrix();
+      // // Set the follower's start orientation
+      // follow_hand_pose.linear() = combined_orientation.toRotationMatrix();
+      // follow_tip_pose.linear() = combined_orientation.toRotationMatrix();
+
+      follow_hand_pose.linear() = follower_final_orientation.toRotationMatrix();
+      follow_tip_pose.linear() = follower_final_orientation.toRotationMatrix();
+
       follower_hand_start_pose = follow_hand_pose;
       
-      RCLCPP_INFO_STREAM(LOGGER, "Follower arm start orientation: " << combined_orientation.coeffs().transpose());
+      RCLCPP_INFO_STREAM(LOGGER, "Follower arm start orientation: " << follower_final_orientation.coeffs().transpose());
     }
 
-    geometry_msgs::msg::Pose adjusted_pose;
-    tf2::convert(follow_hand_pose, adjusted_pose);
-    follower_hand_path.push_back(adjusted_pose);
+    geometry_msgs::msg::Pose adjusted_tip_pose;
+    tf2::convert(follow_tip_pose, adjusted_tip_pose);
+    follower_tip_path.push_back(adjusted_tip_pose);
+
+    geometry_msgs::msg::Pose adjusted_hand_pose;
+    tf2::convert(follow_hand_pose, adjusted_hand_pose);
+    follower_hand_path.push_back(adjusted_hand_pose);
   }
 
   // Test the last orientation of cartesian wapyoints
@@ -387,10 +407,17 @@ bool ConnectMF::computeSecondArmTrajectory(const robot_trajectory::RobotTrajecto
 
   auto follow_scene = intermediate_scene->diff();
 
+  // Define the transform from the "leader_ee_link" to the actual end-effector frame
+  Eigen::Isometry3d follow_grasp_frame_transform = Eigen::Isometry3d::Identity();
+  follow_grasp_frame_transform.translation().z() = 0.1034;  // Offset along the Z-axis
+
   // compute joint trajectory from the cartesian path
   moveit_msgs::msg::RobotTrajectory follow_trajectory_msg;
-  double fraction_follow = move_group_follow_->computeCartesianPath(
-      follower_hand_path, 0.01, 0.0, follow_trajectory_msg, true);
+  double fraction_follow = move_group_follow_->computeCartesianPath(follower_tip_path, 0.01, 0.0, follow_trajectory_msg, true,
+                                                                    nullptr, follow_grasp_frame_transform);
+  // follower_cartesian_planner_.plan(follow_scene, follow_jmg->getLinkModel("left_panda_hand"),
+  //                                follow_grasp_frame_transform, 
+  // follower_hand_path, 0.01, 0.0, follow_trajectory_msg);
 
   robot_trajectory::RobotTrajectoryPtr follow_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(
       follow_scene->getRobotModel(), follow_scene->getRobotModel()->getJointModelGroup(props.get<std::string>("follow_group")));

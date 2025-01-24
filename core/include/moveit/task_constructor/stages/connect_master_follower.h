@@ -42,6 +42,7 @@
 #include <moveit/planning_scene/planning_scene.h>
 #include <moveit/task_constructor/cost_terms.h>
 #include <moveit/move_group_interface/move_group_interface.h>
+#include <moveit_visual_tools/moveit_visual_tools.h>
 
 namespace moveit {
 namespace core {
@@ -70,7 +71,9 @@ class ConnectMF : public Connect
 protected:
 
 public:
-  ConnectMF(const std::string& name, const GroupPlannerVector& planners, const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow);
+  ConnectMF(const std::string& name, const GroupPlannerVector& planners, 
+            const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow,
+            moveit_visual_tools::MoveItVisualTools visual_tools);
   void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }
 
 protected:
@@ -87,6 +90,7 @@ private:
                                    planning_scene::PlanningScenePtr& final_scene);
 
   moveit::planning_interface::MoveGroupInterfacePtr move_group_follow_;
+  moveit_visual_tools::MoveItVisualTools visual_tools_;
 };
 }  // namespace stages
 }  // namespace task_constructor
