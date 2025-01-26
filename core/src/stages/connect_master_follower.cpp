@@ -561,7 +561,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   // Perform time parameterization for velocity consistency
   trajectory_processing::IterativeParabolicTimeParameterization time_param;
-  
+
   robot_trajectory::RobotTrajectory scaled_trajectory(follow_trajectory->getRobotModel(), follow_trajectory->getGroup());
   try {
       scaled_trajectory = reinterpolateTrajectory(follow_trajectory, leader_second_duration, 0.1);
@@ -579,59 +579,59 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   Eigen::Quaterniond next_reached_orientaiton(intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand").rotation());
   RCLCPP_INFO_STREAM(LOGGER, "Follower arm reached orientation after second step: " << next_reached_orientaiton.coeffs().transpose());
 
-  // // /*****************************************/
-  // // /*** Step 3: Connect to the 'to' scene ***/
-  // // /*****************************************/
-  // // Plan joint trajectory for the follower arm
-  // robot_trajectory::RobotTrajectoryPtr to_end_trajectory;
+  // /*****************************************/
+  // /*** Step 3: Connect to the 'to' scene ***/
+  // /*****************************************/
+  // Plan joint trajectory for the follower arm
+  robot_trajectory::RobotTrajectoryPtr to_end_trajectory;
 
-  // for (const auto& pair : planner_) {
-  //   if (pair.first == props.get<std::string>("follow_group")) {
-  //   planning_scene::PlanningSceneConstPtr start = intermediate_scene;
-  //   // const moveit::core::JointModelGroup* jmg = final_goal_state.getJointModelGroup(pair.first);
-  //   planning_scene::PlanningScenePtr end = start->diff();
-  //   moveit::core::RobotState& goal_state = end->getCurrentStateNonConst();
+  for (const auto& pair : planner_) {
+    if (pair.first == props.get<std::string>("follow_group")) {
+    planning_scene::PlanningSceneConstPtr start = intermediate_scene;
+    // const moveit::core::JointModelGroup* jmg = final_goal_state.getJointModelGroup(pair.first);
+    planning_scene::PlanningScenePtr end = start->diff();
+    moveit::core::RobotState& goal_state = end->getCurrentStateNonConst();
 
-  //   // Set the joint group goal
-  //   std::vector<double> positions;
-  //   final_goal_state.copyJointGroupPositions(follow_jmg_, positions);
-  //   goal_state.setJointGroupPositions(follow_jmg_, positions);
-  //   goal_state.update();
+    // Set the joint group goal
+    std::vector<double> positions;
+    final_goal_state.copyJointGroupPositions(follow_jmg_, positions);
+    goal_state.setJointGroupPositions(follow_jmg_, positions);
+    goal_state.update();
 
-  //   // Plan trajectory
-  //   auto result = pair.second->plan(start, end, follow_jmg_, props.get<double>("timeout"), to_end_trajectory);
-  //   success = bool(result);
+    // Plan trajectory
+    auto result = pair.second->plan(start, end, follow_jmg_, props.get<double>("timeout"), to_end_trajectory);
+    success = bool(result);
 
-  //   if (!success) {
-  //       RCLCPP_ERROR_STREAM(LOGGER, "Follower arm trajectory planning to end failed: " << result.message);
-  //       break;
-  //   }
+    if (!success) {
+        RCLCPP_ERROR_STREAM(LOGGER, "Follower arm trajectory planning to end failed: " << result.message);
+        break;
+    }
     
-  //   RCLCPP_INFO_STREAM(LOGGER, "Follower arm trajectory planning to end result: " << success);
+    RCLCPP_INFO_STREAM(LOGGER, "Follower arm trajectory planning to end result: " << success);
     
-  //   // return true;
-  //   }
-  // }
+    // return true;
+    }
+  }
 
-  // follower_trajectory->append(*to_end_trajectory, 0.0);
+  follower_trajectory->append(*to_end_trajectory, 0.0);
 
-  // // Update intermediate scene
-  // if (to_end_trajectory){
-  //   // const moveit::core::JointModelGroup* follow_jmg_ = to_end_trajectory->getGroup();
-  //   const moveit::core::RobotState& follower_final_state = to_end_trajectory->getLastWayPoint();
-  //   std::vector<double> follower_joint_positions;
-  //   follower_final_state.copyJointGroupPositions(follow_jmg_, follower_joint_positions);
+  // Update intermediate scene
+  if (to_end_trajectory){
+    // const moveit::core::JointModelGroup* follow_jmg_ = to_end_trajectory->getGroup();
+    const moveit::core::RobotState& follower_final_state = to_end_trajectory->getLastWayPoint();
+    std::vector<double> follower_joint_positions;
+    follower_final_state.copyJointGroupPositions(follow_jmg_, follower_joint_positions);
 
-  //   moveit::core::RobotState& state = intermediate_scene->getCurrentStateNonConst();
-  //   state.setJointGroupPositions(follow_jmg_, follower_joint_positions);
-  //   state.update();  // Ensure consistency
+    moveit::core::RobotState& state = intermediate_scene->getCurrentStateNonConst();
+    state.setJointGroupPositions(follow_jmg_, follower_joint_positions);
+    state.update();  // Ensure consistency
 
-  //   RCLCPP_INFO_STREAM(LOGGER, "Follower arm state updated in intermediate_scene.");
-  // }
+    RCLCPP_INFO_STREAM(LOGGER, "Follower arm state updated in intermediate_scene.");
+  }
 
-  // // Get current orientation
-  // Eigen::Quaterniond final_reached_orientaiton(intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand").rotation());
-  // RCLCPP_INFO_STREAM(LOGGER, "Follower arm reached final orientation: " << final_reached_orientaiton.coeffs().transpose());
+  // Get current orientation
+  Eigen::Quaterniond final_reached_orientaiton(intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand").rotation());
+  RCLCPP_INFO_STREAM(LOGGER, "Follower arm reached final orientation: " << final_reached_orientaiton.coeffs().transpose());
 
   /* Smoothing */
 
