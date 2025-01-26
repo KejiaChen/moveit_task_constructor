@@ -103,6 +103,9 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
         return;
     }
 
+    RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory computed with " << leader_trajectory->getWayPointCount() << " waypoints");
+    RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory duration: " << leader_trajectory->getDuration());
+
     // Update the leader arm's state in the intermediate scene
     // Update only the leader arm's joints in the intermediate scene
     const moveit::core::JointModelGroup* leader_jmg = leader_trajectory->getGroup();
@@ -261,6 +264,9 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   std::vector<geometry_msgs::msg::Pose> leader_tip_path;
   std::vector<double> path_time_sequnce;
   int leader_start_index = 0;
+
+  double leader_duration_original = leader_trajectory->getDuration();
+  RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory duration: " << leader_duration_original);
   
   if (!ExtractFirstArmCartesianTrajectory(leader_trajectory, final_goal_state, leader_tip_path, path_time_sequnce, 
                                           leader_start_index, start_offset)) {
@@ -288,7 +294,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   // follow_hand_frame_transform.linear() = follower_ee_orientation;
   
 
-  int length = leader_tip_path.size() - 10; // plan until the last 10 waypoints
+  int length = leader_tip_path.size(); // plan until the last 10 waypoints
   for (size_t i = 0; i < length; ++i) {
     double percentage = (double)i / (double)length;
 
@@ -485,11 +491,13 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   /* Time Adjustment */
   auto delayed_to_start_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(to_start_trajectory->getRobotModel(), to_start_trajectory->getGroup());
-  if (to_start_trajectory){
-    // Get the time when finishing the first step
-    double first_step_end_time = to_start_trajectory->getWayPointDurationFromStart(to_start_trajectory->getWayPointCount()-1);
-    double leader_first_step_end_time = leader_trajectory->getWayPointDurationFromStart(leader_start_index);
+  // Get the time when finishing the first step
+  double first_step_end_time = to_start_trajectory->getWayPointDurationFromStart(to_start_trajectory->getWayPointCount());
+  double leader_first_step_end_time = leader_trajectory->getWayPointDurationFromStart(leader_start_index);
 
+  double leader_second_step_start_time = leader_first_step_end_time;
+  double leader_second_step_end_time = leader_duration_original;
+  if (to_start_trajectory){
     // Force the leader_trajectory to wait for the follower_trajectory to finish the first step
     // double pause_duration = first_step_end_time - leader_trajectory->getWayPointDurationFromStart(leader_start_index);
     double pause_duration = first_step_end_time;
@@ -501,24 +509,29 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     }
     leader_trajectory = leader_trajectory_with_pause;
 
+    leader_second_step_start_time = leader_second_step_start_time + pause_duration;
+    leader_second_step_end_time = leader_second_step_end_time + pause_duration;
+
     // Force the follower_trajectory to start after the leader_trajectory finishes the first step
     if (!splitTrajectoryWithPause(to_start_trajectory, leader_first_step_end_time, 0, delayed_to_start_trajectory)) {
       RCLCPP_ERROR(LOGGER, "Failed to delay the follower trajectory.");
       return false;
     }
   }
+  double leader_second_duration = leader_second_step_end_time - leader_second_step_start_time;
+  RCLCPP_INFO_STREAM(LOGGER, "Leader arm second duration: " << leader_second_duration);
 
   follower_trajectory = delayed_to_start_trajectory;
 
-  // Log the hand position
-  RCLCPP_INFO_STREAM(LOGGER, "Follower arm hand position after first step: " << left_panda_hand_transform.translation().transpose());
-  Eigen::Quaterniond first_reached_hand_orientaiton(left_panda_hand_transform.rotation());
-  RCLCPP_INFO_STREAM(LOGGER, "Follower arm hand orientation after first step: " << first_reached_hand_orientaiton.coeffs().transpose());
+  // // Log the hand position
+  // RCLCPP_INFO_STREAM(LOGGER, "Follower arm hand position after first step: " << left_panda_hand_transform.translation().transpose());
+  // Eigen::Quaterniond first_reached_hand_orientaiton(left_panda_hand_transform.rotation());
+  // RCLCPP_INFO_STREAM(LOGGER, "Follower arm hand orientation after first step: " << first_reached_hand_orientaiton.coeffs().transpose());
 
-  // Log the TCP position
-  RCLCPP_INFO_STREAM(LOGGER, "Follower arm TCP position after first step: " << start_position_updated.transpose());
-  Eigen::Quaterniond first_reached_orientaiton(intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand").rotation());
-  RCLCPP_INFO_STREAM(LOGGER, "Follower arm reached orientation after first step: " << first_reached_orientaiton.coeffs().transpose());
+  // // Log the TCP position
+  // RCLCPP_INFO_STREAM(LOGGER, "Follower arm TCP position after first step: " << start_position_updated.transpose());
+  // Eigen::Quaterniond first_reached_orientaiton(intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand").rotation());
+  // RCLCPP_INFO_STREAM(LOGGER, "Follower arm reached orientation after first step: " << first_reached_orientaiton.coeffs().transpose());
 
   /*********************************************************************************/
   /*** Step 2: Follow the first arm's trajectory with an offset in EE frame ***/
@@ -546,7 +559,21 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     RCLCPP_INFO_STREAM(LOGGER, "Follower arm state updated in intermediate_scene.");
   }
 
-  follower_trajectory->append(*follow_trajectory, 0.0);
+  // Perform time parameterization for velocity consistency
+  trajectory_processing::IterativeParabolicTimeParameterization time_param;
+  
+  robot_trajectory::RobotTrajectory scaled_trajectory(follow_trajectory->getRobotModel(), follow_trajectory->getGroup());
+  try {
+      scaled_trajectory = reinterpolateTrajectory(follow_trajectory, leader_second_duration, 0.1);
+      
+      // The new trajectory is now ready for execution or further processing
+  } catch (const std::exception& e) {
+      RCLCPP_ERROR(LOGGER, "Error during trajectory re-interpolation: %s", e.what());
+  }
+
+  follower_trajectory->append(scaled_trajectory, 0.0);
+
+  // follower_trajectory->append(*follow_trajectory, 0.0);
 
   // Get current orientation
   Eigen::Quaterniond next_reached_orientaiton(intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand").rotation());
@@ -693,7 +720,7 @@ double ConnectMF::SecondArmFollow(planning_scene::PlanningScenePtr& intermediate
 
   // compute joint trajectory from the cartesian path
   moveit_msgs::msg::RobotTrajectory follow_trajectory_msg;
-  double fraction_follow = move_group_follow_->computeCartesianPath(follower_tip_path, 0.01, 3.0, follow_trajectory_msg, true,
+  double fraction_follow = move_group_follow_->computeCartesianPath(follower_tip_path, 0.01, 2.0, follow_trajectory_msg, true,
                                                                     nullptr, follow_grasp_frame_transform);
   // follower_cartesian_planner_.plan(follow_scene, follow_jmg_->getLinkModel("left_panda_hand"),
   //                                follow_grasp_frame_transform, 
@@ -764,6 +791,13 @@ bool ConnectMF::splitTrajectoryWithPause(const robot_trajectory::RobotTrajectory
   for (size_t i = split_index; i < trajectory->getWayPointCount(); ++i) {
       second_part->addSuffixWayPoint(trajectory->getWayPoint(i), trajectory->getWayPointDurationFromStart(i) - trajectory->getWayPointDurationFromStart(split_index));
   }
+
+ // Ensure zero velocity at the split points
+  moveit::core::RobotState& first_part_last_state = *first_part->getLastWayPointPtr();
+  first_part_last_state.zeroVelocities();
+
+  moveit::core::RobotState& second_part_first_state = *second_part->getFirstWayPointPtr();
+  second_part_first_state.zeroVelocities();
   
   // create a pause part
   auto pause_part = std::make_shared<robot_trajectory::RobotTrajectory>(trajectory->getRobotModel(), trajectory->getGroup());
@@ -807,6 +841,37 @@ bool ConnectMF::splitTrajectoryWithPause(const robot_trajectory::RobotTrajectory
   }
 
   return true;
+}
+
+robot_trajectory::RobotTrajectory ConnectMF::reinterpolateTrajectory(const robot_trajectory::RobotTrajectoryPtr& original_trajectory, 
+                                                                      double total_time, 
+                                                                      double waypoint_interval) {
+    if (original_trajectory->empty()) {
+        throw std::runtime_error("Input trajectory is empty.");
+    }
+
+    // Get the total duration of the original trajectory
+    double original_duration = original_trajectory->getWayPointDurationFromStart(original_trajectory->getWayPointCount() - 1);
+    double scaling_factor = total_time / original_duration;
+
+    // Create a new trajectory with re-interpolated waypoints
+    robot_trajectory::RobotTrajectory reinterpolated_trajectory(original_trajectory->getRobotModel(), original_trajectory->getGroup());
+
+    // Iterate over the desired time points
+    double current_time = 0.0;
+    while (current_time <= total_time) {
+        // Get the interpolated robot state at `current_time`
+        auto interpolated_state = std::make_shared<moveit::core::RobotState>(original_trajectory->getRobotModel());
+        original_trajectory->getStateAtDurationFromStart(current_time / scaling_factor, interpolated_state);
+
+        // Add the waypoint to the new trajectory
+        reinterpolated_trajectory.addSuffixWayPoint(interpolated_state, waypoint_interval);
+
+        // Move to the next time point
+        current_time += waypoint_interval;
+    }
+
+    return reinterpolated_trajectory;
 }
 
 }  // namespace stages

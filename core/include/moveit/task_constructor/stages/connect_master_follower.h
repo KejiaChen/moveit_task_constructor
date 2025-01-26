@@ -109,6 +109,9 @@ private:
                               const double pause_duration,
                               const int split_index,
                               robot_trajectory::RobotTrajectoryPtr& split_trajectory);
+  
+  robot_trajectory::RobotTrajectory reinterpolateTrajectory(const robot_trajectory::RobotTrajectoryPtr& original_trajectory, 
+                                                           double total_time, double waypoint_interval);
 
   const moveit::core::JointModelGroup* follow_jmg_;
   moveit::planning_interface::MoveGroupInterfacePtr move_group_follow_;
