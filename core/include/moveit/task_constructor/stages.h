@@ -41,6 +41,7 @@
 #include "stages/compute_ik.h"
 #include "stages/compute_ik_multiple.h"
 #include "stages/connect.h"
+#include "stages/connect_master_follower.h"
 #include "stages/current_state.h"
 #include "stages/fix_collision_objects.h"
 #include "stages/fixed_cartesian_poses.h"

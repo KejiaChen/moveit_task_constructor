@@ -19,10 +19,13 @@ set(msg_files
 	msg/TaskDescription.msg
 	msg/TaskStatistics.msg
 	msg/TrajectoryExecutionInfo.msg
+	msg/ClipNames.msg
+	msg/TrajectorySync.msg
 )
 
 set(srv_files
 	srv/GetSolution.srv
+	srv/GetClipNames.srv
 )
 
 set(action_files

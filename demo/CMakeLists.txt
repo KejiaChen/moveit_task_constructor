@@ -52,6 +52,9 @@ function(demo name)
 		LIBRARY DESTINATION lib
 		RUNTIME DESTINATION lib/${PROJECT_NAME}
 	)
+	install(DIRECTORY launch config
+        DESTINATION share/${PROJECT_NAME}
+	)
 endfunction()
 
 demo(cartesian)

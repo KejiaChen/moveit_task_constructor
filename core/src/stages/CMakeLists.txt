@@ -64,6 +64,7 @@ ament_target_dependencies(${PROJECT_NAME}_stages
 	rclcpp
 	tf2_eigen
 	visualization_msgs
+	moveit_visual_tools
 )
 
 add_library(${PROJECT_NAME}_stage_plugins SHARED
