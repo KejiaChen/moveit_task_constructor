@@ -87,13 +87,19 @@ private:
   bool computeSecondArmTrajectory(const robot_trajectory::RobotTrajectoryPtr& first_arm_trajectory,
                                    const InterfaceState& to,
                                    robot_trajectory::RobotTrajectoryPtr& second_arm_trajectory,
-                                   planning_scene::PlanningScenePtr& final_scene);
+                                   planning_scene::PlanningScenePtr& final_scene,
+                                   bool reverse = false);
 
   bool ExtractFirstArmCartesianTrajectory(const robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
                                           const moveit::core::RobotState& final_goal_state,
                                           std::vector<geometry_msgs::msg::Pose>& leader_tip_trajectory,
                                           double start_offset);
+  
+  double SecondArmFollow(planning_scene::PlanningScenePtr& intermediate_scene,
+                                std::vector<geometry_msgs::msg::Pose> follower_tip_path,
+                                robot_trajectory::RobotTrajectoryPtr& follower_trajectory);
 
+  const moveit::core::JointModelGroup* follow_jmg_;
   moveit::planning_interface::MoveGroupInterfacePtr move_group_follow_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
 };
