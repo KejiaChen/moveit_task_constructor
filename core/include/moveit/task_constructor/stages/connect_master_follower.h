@@ -69,9 +69,11 @@ class ConnectMF : public Connect
 {
 
 protected:
+	GroupPlannerVector interpolation_planner_;
 
 public:
   ConnectMF(const std::string& name, const GroupPlannerVector& planners, 
+            const GroupPlannerVector& interpolation_planners,
             const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow,
             moveit_visual_tools::MoveItVisualTools visual_tools);
   void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }

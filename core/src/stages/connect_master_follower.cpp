@@ -32,8 +32,8 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  *********************************************************************/
 
-/* Authors: Michael Goerner, Robert Haschke
-   Desc:    Connect arbitrary states by motion planning
+/* Authors: Kejia Chen
+   Desc:    Connect states in a master-follower manner
 */
 
 #include <moveit/task_constructor/stages/connect_master_follower.h>
@@ -56,10 +56,11 @@ namespace stages {
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("ConnectMF");
 
-ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners, 
+ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners,
+                    const GroupPlannerVector& interpolation_planners,
                     const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow,
                     moveit_visual_tools::MoveItVisualTools visual_tools) 
-    : Connect(name, planners), move_group_follow_(move_group_follow), visual_tools_(visual_tools){
+    : Connect(name, planners), move_group_follow_(move_group_follow), visual_tools_(visual_tools), interpolation_planner_(interpolation_planners) {
 	// setTimeout(1.0);
 	// setCostTerm(std::make_unique<cost::PathLength>());
 
@@ -585,7 +586,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   // Plan joint trajectory for the follower arm
   robot_trajectory::RobotTrajectoryPtr to_end_trajectory;
 
-  for (const auto& pair : planner_) {
+  for (const auto& pair : interpolation_planner_) {
     if (pair.first == props.get<std::string>("follow_group")) {
     planning_scene::PlanningSceneConstPtr start = intermediate_scene;
     // const moveit::core::JointModelGroup* jmg = final_goal_state.getJointModelGroup(pair.first);
