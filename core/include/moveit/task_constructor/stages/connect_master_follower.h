@@ -43,6 +43,7 @@
 #include <moveit/task_constructor/cost_terms.h>
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
+#include <moveit/task_constructor/solvers/cartesian_path.h>
 
 namespace moveit {
 namespace core {
@@ -68,12 +69,17 @@ using GroupStringDict = std::map<std::string, std::string>;
 class ConnectMF : public Connect
 {
 
+public:
+  using GroupCartPlannerVector = std::vector<std::pair<std::string, solvers::CartesianPathPtr>>;
+
 protected:
-	GroupPlannerVector interpolation_planner_;
+  GroupPlannerVector interpolation_planner_;
+  GroupCartPlannerVector cartesian_planner_;
 
 public:
   ConnectMF(const std::string& name, const GroupPlannerVector& planners, 
             const GroupPlannerVector& interpolation_planners,
+            const GroupCartPlannerVector& cartesian_planners,
             const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow,
             moveit_visual_tools::MoveItVisualTools visual_tools);
   void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }

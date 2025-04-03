@@ -58,11 +58,13 @@ static const rclcpp::Logger LOGGER = rclcpp::get_logger("ConnectMF");
 
 ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners,
                     const GroupPlannerVector& interpolation_planners,
+                    const GroupCartPlannerVector& cartesian_planners,
                     const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow,
                     moveit_visual_tools::MoveItVisualTools visual_tools) 
-    : Connect(name, planners), move_group_follow_(move_group_follow), visual_tools_(visual_tools), interpolation_planner_(interpolation_planners) {
+    : Connect(name, planners), move_group_follow_(move_group_follow), visual_tools_(visual_tools),
+      interpolation_planner_(interpolation_planners), cartesian_planner_(cartesian_planners) {
 	// setTimeout(1.0);
-	// setCostTerm(std::make_unique<cost::PathLength>());
+	setCostTerm(std::make_unique<cost::PathLength>());
 
 	auto& p = properties();
 	// p.declare<MergeMode>("merge_mode", WAYPOINTS, "merge mode");
@@ -145,11 +147,12 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
     // auto solution = std::make_shared<SubTrajectory>(dual_arm_trajectory, 0.0, "connect_master_follower");
 
 	SolutionBasePtr solution;
-	if (mode != SEQUENTIAL)  // try to merge
+	if (mode != SEQUENTIAL){ // try to merge
 		solution = mergeIgnoreCollision(sub_trajectories, intermediate_scenes, from.scene()->getCurrentState());
-	if (!solution)  // success == false or merging failed: store sequentially
+  } 
+	if (!solution){ // success == false or merging failed: store sequentially
 		solution = makeSequential(sub_trajectories, intermediate_scenes, from, to);
-	
+	} 
     RCLCPP_INFO_STREAM(LOGGER, "ConnectMF solution computed");
 
 	connect(from, to, solution);
@@ -295,7 +298,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   // follow_hand_frame_transform.linear() = follower_ee_orientation;
   
 
-  int length = leader_tip_path.size(); // plan until the last 10 waypoints
+  int length = leader_tip_path.size();
   for (size_t i = 0; i < length; ++i) {
     double percentage = (double)i / (double)length;
 
@@ -600,12 +603,13 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     goal_state.update();
 
     // Plan trajectory
+    // TODO@KejiaChen: add cost
     auto result = pair.second->plan(start, end, follow_jmg_, props.get<double>("timeout"), to_end_trajectory);
     success = bool(result);
 
     if (!success) {
         RCLCPP_ERROR_STREAM(LOGGER, "Follower arm trajectory planning to end failed: " << result.message);
-        break;
+        return false;
     }
     
     RCLCPP_INFO_STREAM(LOGGER, "Follower arm trajectory planning to end result: " << success);
@@ -721,8 +725,9 @@ double ConnectMF::SecondArmFollow(planning_scene::PlanningScenePtr& intermediate
 
   // compute joint trajectory from the cartesian path
   moveit_msgs::msg::RobotTrajectory follow_trajectory_msg;
+
   double fraction_follow = move_group_follow_->computeCartesianPath(follower_tip_path, 0.01, 2.0, follow_trajectory_msg, true,
-                                                                    nullptr, follow_grasp_frame_transform);
+                                                                    nullptr, follow_grasp_frame_transform, true);
   // follower_cartesian_planner_.plan(follow_scene, follow_jmg_->getLinkModel("left_panda_hand"),
   //                                follow_grasp_frame_transform, 
   // follower_hand_path, 0.01, 0.0, follow_trajectory_msg);
