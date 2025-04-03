@@ -163,7 +163,9 @@ bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::Robot
                                                    std::vector<geometry_msgs::msg::Pose>& leader_tip_path,
                                                    std::vector<double>& path_time,
                                                    int& start_index,
-                                                   double start_offset) {
+                                                   double start_offset,
+                                                   robot_trajectory::RobotTrajectoryPtr& leader_track_trajectory
+                                                  ) {
   // Define the transform from the "leader_ee_link" to the actual end-effector frame
   Eigen::Isometry3d lead_grasp_frame_transform = Eigen::Isometry3d::Identity();
   lead_grasp_frame_transform.translation().z() = 0.1034;  // Offset along the Z-axis
@@ -196,7 +198,7 @@ bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::Robot
       continue;
     }
     
-    if (i>0){
+    if (i > 0){
       // check distance to the leader start point to decide the follower start point
       double distance_from_start  = (tip_pose.translation() - leader_start_tip_pose.translation()).norm();
       // Instead of strating from the first pose, start from the closest to the current pose of the follower arm
@@ -211,6 +213,8 @@ bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::Robot
       RCLCPP_INFO_STREAM(LOGGER, "Follower starts tracking from waypoint index: " << start_index);
       start = true;
     }
+
+    leader_track_trajectory->addSuffixWayPoint(leader_trajectory->getWayPoint(i), leader_trajectory->getWayPointDurationFromStart(i));
     
     // Convert to geometry_msgs::Pose
     geometry_msgs::msg::Pose pose;
@@ -272,11 +276,14 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   double leader_duration_original = leader_trajectory->getDuration();
   RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory duration: " << leader_duration_original);
   
+  auto leader_track_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_trajectory->getRobotModel(), leader_trajectory->getGroup());
   if (!ExtractFirstArmCartesianTrajectory(leader_trajectory, final_goal_state, leader_tip_path, path_time_sequnce, 
-                                          leader_start_index, start_offset)) {
+                                          leader_start_index, start_offset, leader_track_trajectory)) {
     RCLCPP_INFO_STREAM(LOGGER, "Failed to extract leader arm Cartesian trajectory.");
     return false;
   }
+
+  // leader_track_trajectory->print(std::cout);
 
   /* Obtain the Cartesian path for the follower from the leader's Cartesian path */
   std::vector<geometry_msgs::msg::Pose> follower_tip_path;
@@ -540,9 +547,9 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   /*********************************************************************************/
   /*** Step 2: Follow the first arm's trajectory with an offset in EE frame ***/
   /*********************************************************************************/
-  robot_trajectory::RobotTrajectoryPtr follow_trajectory;
+  robot_trajectory::RobotTrajectoryPtr follower_track_trajectory;
 
-  double fraction_follow = SecondArmFollow(intermediate_scene, follower_tip_path, follow_trajectory);
+  double fraction_follow = SecondArmFollow(intermediate_scene, follower_tip_path, follower_track_trajectory);
 
   if (fraction_follow < 1.0) {
     RCLCPP_WARN(LOGGER, "Follower arm failed to follow the first arm's trajectory. Fraction: %f", fraction_follow);
@@ -551,8 +558,8 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     RCLCPP_INFO(LOGGER, "Follower arm successfully followed the first arm's cartesian path.");
 
     // Update intermediate scene
-    // const moveit::core::JointModelGroup* follow_jmg_ = follow_trajectory->getGroup();
-    const moveit::core::RobotState& follower_final_state = follow_trajectory->getLastWayPoint();
+    // const moveit::core::JointModelGroup* follow_jmg_ = follower_track_trajectory->getGroup();
+    const moveit::core::RobotState& follower_final_state = follower_track_trajectory->getLastWayPoint();
     std::vector<double> follower_joint_positions;
     follower_final_state.copyJointGroupPositions(follow_jmg_, follower_joint_positions);
 
@@ -563,12 +570,29 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     RCLCPP_INFO_STREAM(LOGGER, "Follower arm state updated in intermediate_scene.");
   }
 
+  // set tip_link to get cumulative arc length
+  bool set_link = follower_track_trajectory->setTipLink("left_panda_hand");
+  // follow_trajectory->print(std::cout);
+
+  // resample the leader trajectory to match the follower trajectory
+  robot_trajectory::RobotTrajectoryPtr leader_track_resample_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_track_trajectory->getRobotModel(), leader_track_trajectory->getGroup());
+  for (size_t i = 1; i < follower_track_trajectory->getWayPointCount(); ++i) {
+    double follow_arc_length = follower_track_trajectory->getWayPointDurationFromStart(i);
+    
+    // get the corresponding leader trajectory point
+    // auto interpolated_state = std::make_shared<moveit::core::RobotState>(leader_track_trajectory->getRobotModel());
+    // leader_track_trajectory->getStateAtArcDistanceFromStart(follow_arc_length, interpolated_state);
+    // leader_track_resample_trajectory->addSuffixWayPoint(*interpolated_state, 0.0);
+  }
+
+  // leader_track_resample_trajectory->print(std::cout);
+
   // Perform time parameterization for velocity consistency
   trajectory_processing::IterativeParabolicTimeParameterization time_param;
 
-  robot_trajectory::RobotTrajectory scaled_trajectory(follow_trajectory->getRobotModel(), follow_trajectory->getGroup());
+  robot_trajectory::RobotTrajectory scaled_trajectory(follower_track_trajectory->getRobotModel(), follower_track_trajectory->getGroup());
   try {
-      scaled_trajectory = reinterpolateTrajectory(follow_trajectory, leader_second_duration, 0.1);
+      scaled_trajectory = reinterpolateTrajectory(follower_track_trajectory, leader_second_duration, 0.1);
       
       // The new trajectory is now ready for execution or further processing
   } catch (const std::exception& e) {
@@ -577,7 +601,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   follower_trajectory->append(scaled_trajectory, 0.0);
 
-  // follower_trajectory->append(*follow_trajectory, 0.0);
+  // follower_trajectory->append(*follower_track_trajectory, 0.0);
 
   // Get current orientation
   Eigen::Quaterniond next_reached_orientaiton(intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand").rotation());
@@ -726,6 +750,7 @@ double ConnectMF::SecondArmFollow(planning_scene::PlanningScenePtr& intermediate
   // compute joint trajectory from the cartesian path
   moveit_msgs::msg::RobotTrajectory follow_trajectory_msg;
 
+  // TODO@KejiaChen: set time_parameterization to false will lead to problems
   double fraction_follow = move_group_follow_->computeCartesianPath(follower_tip_path, 0.01, 2.0, follow_trajectory_msg, true,
                                                                     nullptr, follow_grasp_frame_transform, true);
   // follower_cartesian_planner_.plan(follow_scene, follow_jmg_->getLinkModel("left_panda_hand"),

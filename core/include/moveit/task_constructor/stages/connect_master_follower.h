@@ -99,11 +99,13 @@ private:
                                    bool reverse = false);
 
   bool ExtractFirstArmCartesianTrajectory(const robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
-                                                   const moveit::core::RobotState& final_goal_state,
-                                                   std::vector<geometry_msgs::msg::Pose>& leader_tip_path,
-                                                   std::vector<double>& path_time,
-                                                   int& start_index,
-                                                   double start_offset);
+                                          const moveit::core::RobotState& final_goal_state,
+                                          std::vector<geometry_msgs::msg::Pose>& leader_tip_path,
+                                          std::vector<double>& path_time,
+                                          int& start_index,
+                                          double start_offset,
+                                          robot_trajectory::RobotTrajectoryPtr& leader_track_trajectory
+                                        );
   
   double SecondArmFollow(planning_scene::PlanningScenePtr& intermediate_scene,
                                 std::vector<geometry_msgs::msg::Pose> follower_tip_path,
