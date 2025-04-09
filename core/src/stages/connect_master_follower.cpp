@@ -76,6 +76,7 @@ ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners
 
     p.declare<std::string>("lead_group", "right_panda_arm", "Group name of the leader.");
     p.declare<std::string>("follow_group", "left_panda_arm", "Group name of the follower.");
+    p.declare<std::string>("dual_group", "dual_arm", "Group name of the dual arm.");
     p.declare<GroupStringDict>("eefs", "vector of names of end-effector group");
 
 }
@@ -111,12 +112,10 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
 
     // Update the leader arm's state in the intermediate scene
     // Update only the leader arm's joints in the intermediate scene
-    const moveit::core::JointModelGroup* leader_jmg = leader_trajectory->getGroup();
-    RCLCPP_INFO_STREAM(LOGGER, "leader group name: " << leader_jmg->getName());
     const moveit::core::RobotState& leader_final_state = leader_trajectory->getLastWayPoint();
     std::vector<double> leader_joint_positions;
-    leader_final_state.copyJointGroupPositions(leader_jmg, leader_joint_positions);
-    intermediate_state.setJointGroupPositions(leader_jmg, leader_joint_positions);
+    leader_final_state.copyJointGroupPositions(leader_jmg_, leader_joint_positions);
+    intermediate_state.setJointGroupPositions(leader_jmg_, leader_joint_positions);
     intermediate_state.update();  // Ensure consistency
 
     intermediate_scenes.push_back(intermediate_scene->diff());
@@ -135,6 +134,8 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
 
     // Combine trajectories into a valid dual-arm solution
     RCLCPP_INFO_STREAM(LOGGER, "Combining leader and follower arm trajectories");
+    RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory computed with " << leader_trajectory->getWayPointCount() << " waypoints");
+    RCLCPP_INFO_STREAM(LOGGER, "Follower arm trajectory computed with " << follower_trajectory->getWayPointCount() << " waypoints");
 
     std::vector<PlannerIdTrajectoryPair> sub_trajectories;
     sub_trajectories.push_back({ "leader_arm", leader_trajectory });
@@ -147,7 +148,7 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
     // auto solution = std::make_shared<SubTrajectory>(dual_arm_trajectory, 0.0, "connect_master_follower");
 
 	SolutionBasePtr solution;
-	if (mode != SEQUENTIAL){ // try to merge
+	if (mode != SEQUENTIAL){ // merge and time parameterization (smoothing)
 		solution = mergeIgnoreCollision(sub_trajectories, intermediate_scenes, from.scene()->getCurrentState());
   } 
 	if (!solution){ // success == false or merging failed: store sequentially
@@ -237,6 +238,7 @@ bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::Robot
 bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
                                           const InterfaceState& to,
                                           robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
+                                          // robot_trajectory::RobotTrajectoryPtr& dual_trajectory,
                                           planning_scene::PlanningScenePtr& intermediate_scene,
                                           bool reverse) {
 
@@ -276,7 +278,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   double leader_duration_original = leader_trajectory->getDuration();
   RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory duration: " << leader_duration_original);
   
-  auto leader_track_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_trajectory->getRobotModel(), leader_trajectory->getGroup());
+  auto leader_track_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_trajectory->getRobotModel(), leader_jmg_);
   if (!ExtractFirstArmCartesianTrajectory(leader_trajectory, final_goal_state, leader_tip_path, path_time_sequnce, 
                                           leader_start_index, start_offset, leader_track_trajectory)) {
     RCLCPP_INFO_STREAM(LOGGER, "Failed to extract leader arm Cartesian trajectory.");
@@ -427,7 +429,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   bool success=false;
   robot_trajectory::RobotTrajectoryPtr to_start_trajectory;
 
-  // Plan joint trajectory for the leader arm
+  // Plan joint trajectory for the follower arm
   for (const auto& pair : planner_) {
     if (pair.first == props.get<std::string>("follow_group")) {
       planning_scene::PlanningSceneConstPtr start = intermediate_scene;
@@ -471,7 +473,6 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   // Validate and update follower arm state in intermediate_scene
   if (to_start_trajectory) {
-    // const moveit::core::JointModelGroup* follow_jmg_ = to_start_trajectory->getGroup();
     const moveit::core::RobotState& follower_final_state = to_start_trajectory->getLastWayPoint();
     std::vector<double> follower_joint_positions;
     follower_final_state.copyJointGroupPositions(follow_jmg_, follower_joint_positions);
@@ -501,7 +502,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   Eigen::Vector3d start_position_updated = tcp_transform.translation();
 
   /* Time Adjustment */
-  auto delayed_to_start_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(to_start_trajectory->getRobotModel(), to_start_trajectory->getGroup());
+  auto delayed_to_start_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(to_start_trajectory->getRobotModel(), follow_jmg_);
   // Get the time when finishing the first step
   double first_step_end_time = to_start_trajectory->getWayPointDurationFromStart(to_start_trajectory->getWayPointCount());
   double leader_first_step_end_time = leader_trajectory->getWayPointDurationFromStart(leader_start_index);
@@ -513,26 +514,38 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     // double pause_duration = first_step_end_time - leader_trajectory->getWayPointDurationFromStart(leader_start_index);
     double pause_duration = first_step_end_time;
     RCLCPP_INFO_STREAM(LOGGER, "Pause duration: " << pause_duration);
-    auto leader_trajectory_with_pause = std::make_shared<robot_trajectory::RobotTrajectory>(leader_trajectory->getRobotModel(), leader_trajectory->getGroup());
-    if (!splitTrajectoryWithPause(leader_trajectory, pause_duration, leader_start_index, leader_trajectory_with_pause)) {
+    auto leader_first_trajectory_with_pause = std::make_shared<robot_trajectory::RobotTrajectory>(leader_trajectory->getRobotModel(), leader_jmg_);
+    if (!splitTrajectoryWithPause(leader_trajectory, pause_duration, leader_start_index, leader_first_trajectory_with_pause, false)) {
       RCLCPP_ERROR(LOGGER, "Failed to split the leader trajectory.");
       return false;
     }
-    leader_trajectory = leader_trajectory_with_pause;
+    leader_trajectory = leader_first_trajectory_with_pause; // leader trajectory until dual arm tracking starts
 
     leader_second_step_start_time = leader_second_step_start_time + pause_duration;
     leader_second_step_end_time = leader_second_step_end_time + pause_duration;
 
     // Force the follower_trajectory to start after the leader_trajectory finishes the first step
-    if (!splitTrajectoryWithPause(to_start_trajectory, leader_first_step_end_time, 0, delayed_to_start_trajectory)) {
+    if (!splitTrajectoryWithPause(to_start_trajectory, leader_first_step_end_time, 0, delayed_to_start_trajectory, true)) {
       RCLCPP_ERROR(LOGGER, "Failed to delay the follower trajectory.");
       return false;
     }
+    follower_trajectory = delayed_to_start_trajectory;
   }
   double leader_second_duration = leader_second_step_end_time - leader_second_step_start_time;
   RCLCPP_INFO_STREAM(LOGGER, "Leader arm second duration: " << leader_second_duration);
 
-  follower_trajectory = delayed_to_start_trajectory;
+  // assert if the two start trajectories have the same number of waypoints
+  if (leader_trajectory->getWayPointCount() != follower_trajectory->getWayPointCount()) {
+    RCLCPP_ERROR(LOGGER, "Leader and follower START trajectories have different number of waypoints! Leader: %zu, Follower: %zu",
+                 leader_trajectory->getWayPointCount(), follower_trajectory->getWayPointCount());
+
+    int add_count = follower_trajectory->getWayPointCount() - leader_trajectory->getWayPointCount();
+    for (size_t i = 0; i < add_count; ++i) {
+      leader_trajectory->addSuffixWayPoint(leader_trajectory->getLastWayPoint(), leader_trajectory->getWayPointDurationFromStart(leader_trajectory->getWayPointCount()));
+    }
+    RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory updated with " << leader_trajectory->getWayPointCount() << " waypoints");
+      
+  }
 
   // // Log the hand position
   // RCLCPP_INFO_STREAM(LOGGER, "Follower arm hand position after first step: " << left_panda_hand_transform.translation().transpose());
@@ -558,7 +571,6 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     RCLCPP_INFO(LOGGER, "Follower arm successfully followed the first arm's cartesian path.");
 
     // Update intermediate scene
-    // const moveit::core::JointModelGroup* follow_jmg_ = follower_track_trajectory->getGroup();
     const moveit::core::RobotState& follower_final_state = follower_track_trajectory->getLastWayPoint();
     std::vector<double> follower_joint_positions;
     follower_final_state.copyJointGroupPositions(follow_jmg_, follower_joint_positions);
@@ -571,37 +583,79 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   }
 
   // set tip_link to get cumulative arc length
-  bool set_link = follower_track_trajectory->setTipLink("left_panda_hand");
-  // follow_trajectory->print(std::cout);
+  if (!follower_track_trajectory->setTipLink("left_panda_hand")) {
+    RCLCPP_ERROR(LOGGER, "Failed to set tip link for follower trajectory.");
+    return false;
+  }
+  
+  if (!leader_track_trajectory->setTipLink("right_panda_hand")) {
+    RCLCPP_ERROR(LOGGER, "Failed to set tip link for leader trajectory.");
+    return false;
+  }
+
+  std::cout << "Follower trajectory:" << std::endl;
+  follower_track_trajectory->print(std::cout);
+
+  double leader_total_distance = leader_track_trajectory->getWayPointDistanceFromStart(leader_track_trajectory->getWayPointCount());
+  std::cout << "Leader track trajectory total distance: " << leader_total_distance << std::endl;
+
+  double follower_total_distance = follower_track_trajectory->getWayPointDistanceFromStart(follower_track_trajectory->getWayPointCount());
+  std::cout << "Follower track trajectory total distance: " << follower_total_distance << std::endl;
 
   // resample the leader trajectory to match the follower trajectory
-  robot_trajectory::RobotTrajectoryPtr leader_track_resample_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_track_trajectory->getRobotModel(), leader_track_trajectory->getGroup());
-  for (size_t i = 1; i < follower_track_trajectory->getWayPointCount(); ++i) {
-    double follow_arc_length = follower_track_trajectory->getWayPointDurationFromStart(i);
-    
-    // get the corresponding leader trajectory point
-    // auto interpolated_state = std::make_shared<moveit::core::RobotState>(leader_track_trajectory->getRobotModel());
-    // leader_track_trajectory->getStateAtArcDistanceFromStart(follow_arc_length, interpolated_state);
-    // leader_track_resample_trajectory->addSuffixWayPoint(*interpolated_state, 0.0);
+  robot_trajectory::RobotTrajectoryPtr leader_track_resample_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_trajectory->getRobotModel(), 
+                                                                                                                              leader_jmg_);
+  
+  // Find the corresponding leader trajectory point for each follower trajectory point with desried distance plus/minus tolerance
+  double start_arc_percent = 0.0;
+  double end_arc_percent = 1.0;
+  double tolerance = 0.002; // 5mm
+  for (size_t i = 0; i < follower_track_trajectory->getWayPointCount(); ++i) {
+    double follow_arc_length = follower_track_trajectory->getWayPointDistanceFromStart(i);
+    const moveit::core::RobotState& follower_state = follower_track_trajectory->getWayPoint(i);
+    Eigen::Isometry3d follower_hand_transform = follower_state.getGlobalLinkTransform("left_panda_hand") * tcp_offset;
+
+    // search for the leader trajectory point with incremental of 0.002
+    for (double s=start_arc_percent; s<end_arc_percent; s+=0.002){
+      double leader_arc_length = s * leader_total_distance;
+      auto master_interpolated_state = std::make_shared<moveit::core::RobotState>(leader_trajectory->getRobotModel());
+      leader_track_trajectory->getStateAtArcDistanceFromStart(leader_arc_length, master_interpolated_state);
+
+      // check the distance between the leader and follower trajectory
+      Eigen::Isometry3d leader_hand_transform = master_interpolated_state->getGlobalLinkTransform("right_panda_hand") * tcp_offset;
+      double distance = (leader_hand_transform.translation() - follower_hand_transform.translation()).norm();
+      // std::cout << "Distance: " << distance << std::endl;
+
+      if (abs(distance - track_offset) < tolerance) {
+        RCLCPP_INFO_STREAM(LOGGER, "Arc length: " << leader_arc_length << ", distance: " << distance);
+        leader_track_resample_trajectory->addSuffixWayPoint(master_interpolated_state, 0.0);
+
+        start_arc_percent = s;
+        break;
+      }
+
+      if (s == end_arc_percent) {
+        RCLCPP_WARN_STREAM(LOGGER, "No matching point found for follower trajectory at index: " << i);
+      }
+    }
+
+  }
+  if (!leader_track_resample_trajectory->setTipLink("right_panda_hand")) {
+    RCLCPP_ERROR(LOGGER, "Failed to set tip link for leader trajectory.");
+    return false;
   }
 
-  // leader_track_resample_trajectory->print(std::cout);
+  std::cout << "Leader track trajectory:" << std::endl;
+  leader_track_resample_trajectory->print(std::cout);
 
-  // Perform time parameterization for velocity consistency
-  trajectory_processing::IterativeParabolicTimeParameterization time_param;
-
-  robot_trajectory::RobotTrajectory scaled_trajectory(follower_track_trajectory->getRobotModel(), follower_track_trajectory->getGroup());
-  try {
-      scaled_trajectory = reinterpolateTrajectory(follower_track_trajectory, leader_second_duration, 0.1);
-      
-      // The new trajectory is now ready for execution or further processing
-  } catch (const std::exception& e) {
-      RCLCPP_ERROR(LOGGER, "Error during trajectory re-interpolation: %s", e.what());
+  if (leader_track_resample_trajectory->getWayPointCount() != follower_track_trajectory->getWayPointCount()) {
+    RCLCPP_ERROR(LOGGER, "Leader and follower TRACK trajectories have different number of waypoints! Leader: %zu, Follower: %zu",
+                 leader_track_resample_trajectory->getWayPointCount(), follower_track_trajectory->getWayPointCount());
   }
 
-  follower_trajectory->append(scaled_trajectory, 0.0);
-
-  // follower_trajectory->append(*follower_track_trajectory, 0.0);
+  leader_trajectory->append(*leader_track_resample_trajectory, 0.0);
+  follower_trajectory->append(*follower_track_trajectory, 0.0);
+  // dual_trajectory->append(*dual_track_trajectory, 0.0);
 
   // Get current orientation
   Eigen::Quaterniond next_reached_orientaiton(intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand").rotation());
@@ -641,12 +695,27 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     // return true;
     }
   }
+  robot_trajectory::RobotTrajectoryPtr leader_end_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_trajectory->getRobotModel(), 
+                                                                                                                   leader_jmg_);
 
+  for (size_t i = 0; i < to_end_trajectory->getWayPointCount(); ++i) {
+    // Set the leader joint group states to the last waypoint of the previous leader trajectory
+    const moveit::core::RobotState& leader_state = leader_trajectory->getLastWayPoint();
+    std::vector<double> leader_joint_positions;
+    leader_state.copyJointGroupPositions(leader_jmg_, leader_joint_positions);
+    leader_end_trajectory->addSuffixWayPoint(leader_state, to_end_trajectory->getWayPointDurationFromStart(i));
+  }
+
+  if (leader_end_trajectory->getWayPointCount() != to_end_trajectory->getWayPointCount()) {
+    RCLCPP_ERROR(LOGGER, "Leader and follower END trajectories have different number of waypoints! Leader: %zu, Follower: %zu",
+                 leader_end_trajectory->getWayPointCount(), to_end_trajectory->getWayPointCount());
+  }
+  
+  leader_trajectory->append(*leader_end_trajectory, 0.0);
   follower_trajectory->append(*to_end_trajectory, 0.0);
 
   // Update intermediate scene
   if (to_end_trajectory){
-    // const moveit::core::JointModelGroup* follow_jmg_ = to_end_trajectory->getGroup();
     const moveit::core::RobotState& follower_final_state = to_end_trajectory->getLastWayPoint();
     std::vector<double> follower_joint_positions;
     follower_final_state.copyJointGroupPositions(follow_jmg_, follower_joint_positions);
@@ -663,23 +732,22 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   RCLCPP_INFO_STREAM(LOGGER, "Follower arm reached final orientation: " << final_reached_orientaiton.coeffs().transpose());
 
   /* Smoothing */
+  // // Perform time parameterization for velocity consistency
+  // // trajectory_processing::IterativeParabolicTimeParameterization time_param;
 
-  // Perform time parameterization for velocity consistency
-  // trajectory_processing::IterativeParabolicTimeParameterization time_param;
+  // // if (!time_param.computeTimeStamps(*follower_trajectory)) {
+  // //     RCLCPP_ERROR(LOGGER, "Time parameterization failed for the follower arm's trajectory.");
+  // //     return false;
+  // // }
 
-  // if (!time_param.computeTimeStamps(*follower_trajectory)) {
-  //     RCLCPP_ERROR(LOGGER, "Time parameterization failed for the follower arm's trajectory.");
-  //     return false;
-  // }
-
-  trajectory_processing::RuckigSmoothing ruckig_smoother;
+  // trajectory_processing::RuckigSmoothing ruckig_smoother;
     
-  // Apply Ruckig smoothing to the trajectory
-  if (!ruckig_smoother.applySmoothing(*follower_trajectory)) {
-      RCLCPP_ERROR(LOGGER, "Ruckig smoothing failed to smooth trajectory.");
-  } else {
-      RCLCPP_INFO(LOGGER, "Ruckig smoothing successfully applied.");
-  }
+  // // Apply Ruckig smoothing to the trajectory
+  // if (!ruckig_smoother.applySmoothing(*follower_trajectory)) {
+  //     RCLCPP_ERROR(LOGGER, "Ruckig smoothing failed to smooth trajectory.");
+  // } else {
+  //     RCLCPP_INFO(LOGGER, "Ruckig smoothing successfully applied.");
+  // }
 
   return true;
 }
@@ -699,18 +767,19 @@ bool ConnectMF::computeFirstArmTrajectory(const InterfaceState& from, const Inte
   for (const auto& pair : planner_) {
     if (pair.first == props.get<std::string>("lead_group")) {
       planning_scene::PlanningSceneConstPtr start = from.scene();
-      const moveit::core::JointModelGroup* jmg = final_goal_state.getJointModelGroup(pair.first);
+      leader_jmg_ = final_goal_state.getJointModelGroup(pair.first);
+      RCLCPP_INFO_STREAM(LOGGER, "leader group name: " << leader_jmg_->getName());
       intermediate_scene = start->diff();
       moveit::core::RobotState& goal_state = intermediate_scene->getCurrentStateNonConst();
 
       // Set the joint group goal
       std::vector<double> positions;
-      final_goal_state.copyJointGroupPositions(jmg, positions);
-      goal_state.setJointGroupPositions(jmg, positions);
+      final_goal_state.copyJointGroupPositions(leader_jmg_, positions);
+      goal_state.setJointGroupPositions(leader_jmg_, positions);
       goal_state.update();
 
       // Plan trajectory
-      auto result = pair.second->plan(start, intermediate_scene, jmg, props.get<double>("timeout"),
+      auto result = pair.second->plan(start, intermediate_scene, leader_jmg_, props.get<double>("timeout"),
                                       leader_trajectory, path_constraints);
       success = bool(result);
 
@@ -788,7 +857,7 @@ SubTrajectoryPtr ConnectMF::mergeIgnoreCollision(const std::vector<PlannerIdTraj
 	auto jmg = merged_jmg_.get();
 	assert(jmg);
 	auto timing = properties().get<TimeParameterizationPtr>("merge_time_parameterization");
-	robot_trajectory::RobotTrajectoryPtr trajectory = task_constructor::merge(subs, state, jmg, *timing);
+	robot_trajectory::RobotTrajectoryPtr trajectory = task_constructor::merge(subs, state, jmg, *timing); // merge and smoothing
 	if (!trajectory){
 		RCLCPP_INFO(LOGGER, "Failed to merge trajectories");
 		return SubTrajectoryPtr();
@@ -807,70 +876,77 @@ SubTrajectoryPtr ConnectMF::mergeIgnoreCollision(const std::vector<PlannerIdTraj
 bool ConnectMF::splitTrajectoryWithPause(const robot_trajectory::RobotTrajectoryPtr& trajectory,
                                           const double pause_duration,
                                           const int split_index,
-                                          robot_trajectory::RobotTrajectoryPtr& split_trajectory){
+                                          robot_trajectory::RobotTrajectoryPtr& split_trajectory,
+                                          bool if_return_full)
+{
   auto first_part = std::make_shared<robot_trajectory::RobotTrajectory>(trajectory->getRobotModel(), trajectory->getGroup());
   auto second_part = std::make_shared<robot_trajectory::RobotTrajectory>(trajectory->getRobotModel(), trajectory->getGroup());
 
   RCLCPP_INFO_STREAM(LOGGER, "Splitting the trajectory at index: " << split_index);
 
-  // Add waypoints to the first part
-  for (size_t i = 0; i <= split_index; ++i) {
-      first_part->addSuffixWayPoint(trajectory->getWayPoint(i), trajectory->getWayPointDurationFromStart(i));
+  for (size_t i = 0; i < split_index; ++i) {
+      double delta = (i == 0) ? 0.0 : trajectory->getWayPointDurationFromStart(i) - trajectory->getWayPointDurationFromStart(i-1);
+      first_part->addSuffixWayPoint(trajectory->getWayPoint(i), delta);
   }
+  std::cout << "First part has " << first_part->getWayPointCount() << " waypoints for duration: " 
+    << first_part->getWayPointDurationFromStart(first_part->getWayPointCount() - 1) << std::endl;
 
   // Add waypoints to the second part
   for (size_t i = split_index; i < trajectory->getWayPointCount(); ++i) {
-      second_part->addSuffixWayPoint(trajectory->getWayPoint(i), trajectory->getWayPointDurationFromStart(i) - trajectory->getWayPointDurationFromStart(split_index));
+      double delta = (i == 0) ? 0.0 : trajectory->getWayPointDurationFromStart(i) - trajectory->getWayPointDurationFromStart(i-1);
+      second_part->addSuffixWayPoint(trajectory->getWayPoint(i), delta);
   }
+  std::cout << "Second part has " << second_part->getWayPointCount() << " waypoints for duration: " 
+    << second_part->getWayPointDurationFromStart(second_part->getWayPointCount() - 1) - second_part->getWayPointDurationFromStart(0) << std::endl;
 
- // Ensure zero velocity at the split points
-  moveit::core::RobotState& first_part_last_state = *first_part->getLastWayPointPtr();
-  first_part_last_state.zeroVelocities();
-
-  moveit::core::RobotState& second_part_first_state = *second_part->getFirstWayPointPtr();
-  second_part_first_state.zeroVelocities();
-  
   // create a pause part
   auto pause_part = std::make_shared<robot_trajectory::RobotTrajectory>(trajectory->getRobotModel(), trajectory->getGroup());
-  moveit::core::RobotState pause_state = first_part->getLastWayPoint();
-  // Add duplicate waypoints for the pause duration
-  for (double t = 0.1; t <= pause_duration; t += 0.1) {
-      pause_part->addSuffixWayPoint(pause_state, t);
+  moveit::core::RobotState pause_state(trajectory->getRobotModel());
+  if (first_part->getWayPointCount() > 0) {
+    moveit::core::RobotState& first_part_last_state = *first_part->getLastWayPointPtr();
+    // Ensure zero velocity at the split points
+    first_part_last_state.zeroVelocities();
+    pause_state = first_part_last_state;
+  } else{
+    moveit::core::RobotState& second_part_first_state = *second_part->getFirstWayPointPtr();
+    // Ensure zero velocity at the split points
+    second_part_first_state.zeroVelocities();
+    pause_state = second_part_first_state;
   }
 
-  trajectory_processing::IterativeParabolicTimeParameterization time_param;
-  // Smooth the first part
-  if (!time_param.computeTimeStamps(*first_part)) {
-      RCLCPP_ERROR(LOGGER, "Time parameterization failed for the first part.");
+  // Add duplicate waypoints for the pause duration
+  for (double t = 0.1; t <= pause_duration; t += 0.1) {
+      pause_part->addSuffixWayPoint(pause_state, 0.1);
   }
-  // Smooth the pause part (no motion, so time stamps remain consistent)
-  if (!time_param.computeTimeStamps(*pause_part)) {
-      RCLCPP_ERROR(LOGGER, "Time parameterization failed for the pause part.");
-  }
-  // Smooth the second part
-  if (!time_param.computeTimeStamps(*second_part)) {
-      RCLCPP_ERROR(LOGGER, "Time parameterization failed for the second part.");
-  }
+  std::cout << "Pause part has " << pause_part->getWayPointCount() << " waypoints for duration: " << pause_duration << std::endl;
+
+  // trajectory_processing::IterativeParabolicTimeParameterization time_param;
+  // // Smooth the first part
+  // if (!time_param.computeTimeStamps(*first_part)) {
+  //     RCLCPP_ERROR(LOGGER, "Time parameterization failed for the first part.");
+  // }
+  // // Smooth the pause part (no motion, so time stamps remain consistent)
+  // if (!time_param.computeTimeStamps(*pause_part)) {
+  //     RCLCPP_ERROR(LOGGER, "Time parameterization failed for the pause part.");
+  // }
+  // // Smooth the second part
+  // if (!time_param.computeTimeStamps(*second_part)) {
+  //     RCLCPP_ERROR(LOGGER, "Time parameterization failed for the second part.");
+  // }
 
   // auto split_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(trajectory->getRobotModel(), trajectory->getGroup());
 
   // Add waypoints from the first part
-  for (size_t i = 0; i < first_part->getWayPointCount(); ++i) {
-      split_trajectory->addSuffixWayPoint(first_part->getWayPoint(i), first_part->getWayPointDurationFromStart(i));
+  split_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(trajectory->getRobotModel(), trajectory->getGroup());
+  if (first_part->getWayPointCount() > 0) {
+    split_trajectory->append(*first_part, 0.0);
+  }
+  split_trajectory->append(*pause_part, 0.0);
+  if (if_return_full) {
+    split_trajectory->append(*second_part, 0.0);
   }
 
-  // Add waypoints from the pause part
-  double pause_time_offset = split_trajectory->getWayPointDurationFromStart(split_trajectory->getWayPointCount() - 1);
-  for (size_t i = 0; i < pause_part->getWayPointCount(); ++i) {
-      split_trajectory->addSuffixWayPoint(pause_part->getWayPoint(i), pause_time_offset + pause_part->getWayPointDurationFromStart(i));
-  }
-
-  // Add waypoints from the second part
-  double second_part_time_offset = split_trajectory->getWayPointDurationFromStart(split_trajectory->getWayPointCount() - 1);
-  for (size_t i = 0; i < second_part->getWayPointCount(); ++i) {
-      split_trajectory->addSuffixWayPoint(second_part->getWayPoint(i), second_part_time_offset + second_part->getWayPointDurationFromStart(i));
-  }
-
+  std::cout << "Split trajectory has " << split_trajectory->getWayPointCount() << " waypoints." << std::endl;
   return true;
 }
 
@@ -905,6 +981,48 @@ robot_trajectory::RobotTrajectory ConnectMF::reinterpolateTrajectory(const robot
     return reinterpolated_trajectory;
 }
 
-}  // namespace stages
+void ConnectMF::splitGroupFromState(const moveit::core::JointModelGroup* group,
+  const moveit::core::RobotState& dual_state,
+  moveit::core::RobotState& single_group_state)
+{
+/* For a state containing multiple groups, split only the specified group from the state */
+
+// Set the single group state to default values
+single_group_state.setToDefaultValues();
+
+// Copy joint positions
+std::vector<double> joint_positions;
+dual_state.copyJointGroupPositions(group, joint_positions);
+single_group_state.setJointGroupPositions(group, joint_positions);
+
+// Copy velocities if available
+if (dual_state.hasVelocities())
+{
+std::vector<double> joint_velocities;
+dual_state.copyJointGroupVelocities(group, joint_velocities);
+single_group_state.setJointGroupVelocities(group, joint_velocities);
+}
+
+// Copy accelerations if available
+if (dual_state.hasAccelerations())
+{
+std::vector<double> joint_accelerations;
+dual_state.copyJointGroupAccelerations(group, joint_accelerations);
+single_group_state.setJointGroupAccelerations(group, joint_accelerations);
+}
+
+// // Copy effort if available
+// if (dual_state.hasEffort())
+// {
+// std::vector<double> joint_effort;
+// dual_state.copyJointGroupEffort(group, joint_effort);
+// single_group_state.setJointGroupEffort(group, joint_effort);
+// }
+
+// Update the state to ensure consistency
+single_group_state.update();
+}
+
+}  // namespace connect_master_follower
 }  // namespace task_constructor
 }  // namespace moveit

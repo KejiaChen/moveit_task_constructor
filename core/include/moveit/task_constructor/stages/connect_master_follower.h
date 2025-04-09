@@ -118,12 +118,18 @@ private:
   bool splitTrajectoryWithPause(const robot_trajectory::RobotTrajectoryPtr& trajectory,
                               const double pause_duration,
                               const int split_index,
-                              robot_trajectory::RobotTrajectoryPtr& split_trajectory);
+                              robot_trajectory::RobotTrajectoryPtr& split_trajectory,
+                              bool if_return_full = true);
   
   robot_trajectory::RobotTrajectory reinterpolateTrajectory(const robot_trajectory::RobotTrajectoryPtr& original_trajectory, 
                                                            double total_time, double waypoint_interval);
+  
+  void splitGroupFromState(const moveit::core::JointModelGroup* group,
+                            const moveit::core::RobotState& dual_state,
+                            moveit::core::RobotState& single_group_state);
 
   const moveit::core::JointModelGroup* follow_jmg_;
+  const moveit::core::JointModelGroup* leader_jmg_;
   moveit::planning_interface::MoveGroupInterfacePtr move_group_follow_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
 };
