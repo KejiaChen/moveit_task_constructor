@@ -66,8 +66,8 @@ ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners
      visual_tools_(visual_tools),
      interpolation_planner_(interpolation_planners), 
      cartesian_planner_(cartesian_planners),
-     lead_flange_to_tcp_transform_(Eigen::Isometry3d::Identity()),
-     follow_flange_to_tcp_transform_(Eigen::Isometry3d::Identity()) 
+     lead_hand_to_tcp_transform_(Eigen::Isometry3d::Identity()),
+     follow_hand_to_tcp_transform_(Eigen::Isometry3d::Identity()) 
 {
 	// setTimeout(1.0);
 	setCostTerm(std::make_unique<cost::PathLength>());
@@ -84,8 +84,12 @@ ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners
     p.declare<std::string>("follow_group", "left_panda_arm", "Group name of the follower.");
     p.declare<std::string>("dual_group", "dual_arm", "Group name of the dual arm.");
     p.declare<GroupStringDict>("eefs", "vector of names of end-effector group");
-    p.declare<double>("lead_flange_to_tcp_transform_z", 0.1034, "z offset of the leader flange to TCP");
-    p.declare<double>("follow_flange_to_tcp_transform_z", 0.1034, "z offset of the follower flange to TCP");
+
+    Eigen::Isometry3d default_hand_to_tcp_transform = Eigen::Isometry3d::Identity();
+    default_hand_to_tcp_transform.translation().z() = 0.1034; // default z offset of the hand to TCP
+
+    p.declare<Eigen::Isometry3d>("lead_hand_to_tcp_transform", default_hand_to_tcp_transform, "transform from lead hand to TCP");
+    p.declare<Eigen::Isometry3d>("follow_hand_to_tcp_transform", default_hand_to_tcp_transform, "transform from follow hand to TCP");
 }
 
 void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
@@ -93,8 +97,8 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
 	double timeout = this->timeout();
 	MergeMode mode = props.get<MergeMode>("merge_mode");
 	double max_distance = props.get<double>("max_distance");
-  lead_flange_to_tcp_transform_.translation().z() = props.get<double>("lead_flange_to_tcp_transform_z");
-  follow_flange_to_tcp_transform_.translation().z() = props.get<double>("follow_flange_to_tcp_transform_z");
+  lead_hand_to_tcp_transform_ = props.get<Eigen::Isometry3d>("lead_hand_to_tcp_transform");
+  follow_hand_to_tcp_transform_ = props.get<Eigen::Isometry3d>("follow_hand_to_tcp_transform");
 
     RCLCPP_INFO_STREAM(LOGGER, "Computing dual-arm trajectory");
 
@@ -195,7 +199,7 @@ bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::Robot
     }
     Eigen::Isometry3d ee_link_pose = point.getGlobalLinkTransform(leader_ee_link); // hand pose
     // Apply the transform to get the pose of the actual end-effector
-    Eigen::Isometry3d tip_pose = ee_link_pose * lead_flange_to_tcp_transform_;
+    Eigen::Isometry3d tip_pose = ee_link_pose * lead_hand_to_tcp_transform_;
     // leader start pose
     if (i == 0) {
       tf2::convert(ee_link_pose, leader_start_hand_pose_msg);
@@ -299,7 +303,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   // Define the transform from the tip frame to "follower_ee_link"
   Eigen::Isometry3d follow_hand_frame_transform = Eigen::Isometry3d::Identity();
-  follow_hand_frame_transform.translation().z() = -follow_flange_to_tcp_transform_.translation().z();  // Offset along the Z-axis
+  follow_hand_frame_transform.translation().z() = -follow_hand_to_tcp_transform_.translation().z();  // Offset along the Z-axis
   // Eigen::Matrix3d follower_ee_orientation;
   // follower_ee_orientation << 0.7071, -0.7071, 0,
   //                           0.7071, 0.7071, 0,
@@ -494,7 +498,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   //                           -0.7071, 0.7071, 0,
   //                           0, 0, 1;
   // tcp_offset.linear() = follower_ee_orientation;
-  Eigen::Isometry3d tcp_transform = left_panda_hand_transform * follow_flange_to_tcp_transform_;
+  Eigen::Isometry3d tcp_transform = left_panda_hand_transform * follow_hand_to_tcp_transform_;
   // Get the translation of the TCP
   Eigen::Vector3d start_position_updated = tcp_transform.translation();
 
@@ -540,7 +544,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     for (size_t i = 0; i < add_count; ++i) {
       leader_trajectory->addSuffixWayPoint(leader_trajectory->getLastWayPoint(), leader_trajectory->getWayPointDurationFromStart(leader_trajectory->getWayPointCount()));
     }
-    RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory updated with " << leader_trajectory->getWayPointCount() << " waypoints");
+    RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory updated with additional pause to " << leader_trajectory->getWayPointCount() << " waypoints");
       
   }
 
@@ -610,7 +614,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   for (size_t i = 0; i < follower_track_trajectory->getWayPointCount(); ++i) {
     double follow_arc_length = follower_track_trajectory->getWayPointDistanceFromStart(i);
     const moveit::core::RobotState& follower_state = follower_track_trajectory->getWayPoint(i);
-    Eigen::Isometry3d follower_hand_transform = follower_state.getGlobalLinkTransform("left_panda_hand") * follow_flange_to_tcp_transform_;
+    Eigen::Isometry3d follower_hand_transform = follower_state.getGlobalLinkTransform("left_panda_hand") * follow_hand_to_tcp_transform_;
 
     // search for the leader trajectory point with incremental of 0.002
     for (double s=start_arc_percent; s<end_arc_percent; s+=0.002){
@@ -619,7 +623,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
       leader_track_trajectory->getStateAtArcDistanceFromStart(leader_arc_length, master_interpolated_state);
 
       // check the distance between the leader and follower trajectory
-      Eigen::Isometry3d leader_hand_transform = master_interpolated_state->getGlobalLinkTransform("right_panda_hand") * follow_flange_to_tcp_transform_;
+      Eigen::Isometry3d leader_hand_transform = master_interpolated_state->getGlobalLinkTransform("right_panda_hand") * lead_hand_to_tcp_transform_;
       double distance = (leader_hand_transform.translation() - follower_hand_transform.translation()).norm();
       // std::cout << "Distance: " << distance << std::endl;
 
@@ -808,7 +812,7 @@ double ConnectMF::SecondArmFollow(planning_scene::PlanningScenePtr& intermediate
   follower_ee_orientation << 0.7071, 0.7071, 0,
                             -0.7071, 0.7071, 0,
                             0, 0, 1;
-  Eigen::Isometry3d follow_grasp_frame_transform = follow_flange_to_tcp_transform_;
+  Eigen::Isometry3d follow_grasp_frame_transform = follow_hand_to_tcp_transform_;
   follow_grasp_frame_transform.linear() = follower_ee_orientation;
 
   // compute joint trajectory from the cartesian path
