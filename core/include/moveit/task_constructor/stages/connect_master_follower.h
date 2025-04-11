@@ -132,6 +132,9 @@ private:
   const moveit::core::JointModelGroup* leader_jmg_;
   moveit::planning_interface::MoveGroupInterfacePtr move_group_follow_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
+
+  Eigen::Isometry3d lead_flange_to_tcp_transform_;
+  Eigen::Isometry3d follow_flange_to_tcp_transform_;
 };
 }  // namespace stages
 }  // namespace task_constructor
