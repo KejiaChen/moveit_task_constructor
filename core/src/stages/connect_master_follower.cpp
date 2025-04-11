@@ -175,11 +175,7 @@ bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::Robot
                                                    int& start_index,
                                                    double start_offset,
                                                    robot_trajectory::RobotTrajectoryPtr& leader_track_trajectory
-                                                  ) {
-  // Define the transform from the "leader_ee_link" to the actual end-effector frame
-  // Eigen::Isometry3d lead_grasp_frame_transform = Eigen::Isometry3d::Identity();
-  // lead_grasp_frame_transform.translation().z() = 0.1034;  // Offset along the Z-axis
-  
+                                                  ) {  
   // std::vector<geometry_msgs::msg::Pose> leader_tip_path;
   geometry_msgs::msg::Pose leader_start_hand_pose_msg;
   Eigen::Isometry3d leader_start_tip_pose;
@@ -274,10 +270,6 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   RCLCPP_INFO_STREAM(LOGGER, "Computing trajectory for the second arm");
 
-  // Define the transform from the "leader_ee_link" to the actual end-effector frame
-  // Eigen::Isometry3d lead_grasp_frame_transform = Eigen::Isometry3d::Identity();
-  // lead_grasp_frame_transform.translation().z() = 0.1034;  // Offset along the Z-axis
-
   /* Extract the Cartesian trajectory of the first arm */ 
   std::vector<geometry_msgs::msg::Pose> leader_tip_path;
   std::vector<double> path_time_sequnce;
@@ -307,7 +299,6 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   // Define the transform from the tip frame to "follower_ee_link"
   Eigen::Isometry3d follow_hand_frame_transform = Eigen::Isometry3d::Identity();
-  // follow_hand_frame_transform.translation().z() = -0.1034;  // Offset along the Z-axis
   follow_hand_frame_transform.translation().z() = -follow_flange_to_tcp_transform_.translation().z();  // Offset along the Z-axis
   // Eigen::Matrix3d follower_ee_orientation;
   // follower_ee_orientation << 0.7071, -0.7071, 0,
@@ -497,9 +488,6 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   // Get current position and orientation
   Eigen::Isometry3d left_panda_hand_transform = intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand");
-  // Define the Z-offset in the left_panda_hand frame
-  // Eigen::Isometry3d tcp_offset = Eigen::Isometry3d::Identity();
-  // tcp_offset.translation().z() = 0.1034; // Set the Z-offset value
   // Define the transform from the "leader_ee_link" to the actual end-effector frame
   // Eigen::Matrix3d follower_ee_orientation;
   // follower_ee_orientation << 0.7071, 0.7071, 0,
@@ -820,8 +808,6 @@ double ConnectMF::SecondArmFollow(planning_scene::PlanningScenePtr& intermediate
   follower_ee_orientation << 0.7071, 0.7071, 0,
                             -0.7071, 0.7071, 0,
                             0, 0, 1;
-  // Eigen::Isometry3d follow_grasp_frame_transform = Eigen::Isometry3d::Identity();
-  // follow_grasp_frame_transform.translation().z() = 0.1034;  // Offset along the Z-axis
   Eigen::Isometry3d follow_grasp_frame_transform = follow_flange_to_tcp_transform_;
   follow_grasp_frame_transform.linear() = follower_ee_orientation;
 
