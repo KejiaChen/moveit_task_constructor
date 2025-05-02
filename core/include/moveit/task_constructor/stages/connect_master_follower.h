@@ -92,11 +92,14 @@ private:
                                   robot_trajectory::RobotTrajectoryPtr& first_arm_trajectory,
                                   planning_scene::PlanningScenePtr& intermediate_scene);
 
-  bool computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr& first_arm_trajectory,
-                                   const InterfaceState& to,
-                                   robot_trajectory::RobotTrajectoryPtr& second_arm_trajectory,
-                                   planning_scene::PlanningScenePtr& final_scene,
-                                   bool reverse = false);
+  bool computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
+                                  std::vector<PlannerIdTrajectoryPair>& leader_trajectories,
+                                  const InterfaceState& to,
+                                  robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
+                                  std::vector<PlannerIdTrajectoryPair>& follower_trajectories,
+                                  planning_scene::PlanningScenePtr& lead_final_scene,
+                                  std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
+                                  bool reverse=false);
 
   bool ExtractFirstArmCartesianTrajectory(const robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
                                           const moveit::core::RobotState& final_goal_state,
@@ -112,21 +115,27 @@ private:
                                 robot_trajectory::RobotTrajectoryPtr& follower_trajectory);
 
   SubTrajectoryPtr mergeIgnoreCollision(const std::vector<PlannerIdTrajectoryPair>& sub_trajectories,
-                                  const std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
+                                  // const std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
                                   const moveit::core::RobotState& state);
   
   bool splitTrajectoryWithPause(const robot_trajectory::RobotTrajectoryPtr& trajectory,
-                              const double pause_duration,
-                              const int split_index,
-                              robot_trajectory::RobotTrajectoryPtr& split_trajectory,
-                              bool if_return_full = true);
-  
+                                const double pause_duration,
+                                const int split_index,
+                                robot_trajectory::RobotTrajectoryPtr& split_trajectory,
+                                std::vector<robot_trajectory::RobotTrajectoryPtr>& split_trajectories,
+                                bool if_return_full=true);
+                              
   robot_trajectory::RobotTrajectory reinterpolateTrajectory(const robot_trajectory::RobotTrajectoryPtr& original_trajectory, 
                                                            double total_time, double waypoint_interval);
   
   void splitGroupFromState(const moveit::core::JointModelGroup* group,
                             const moveit::core::RobotState& dual_state,
                             moveit::core::RobotState& single_group_state);
+
+  void updateDualIntermediateState(const moveit::core::RobotState& leader_state,
+                                    const moveit::core::RobotState& follower_state,
+                                    planning_scene::PlanningScenePtr& start,
+                                    planning_scene::PlanningScenePtr& end);
 
   const moveit::core::JointModelGroup* follow_jmg_;
   const moveit::core::JointModelGroup* leader_jmg_;
