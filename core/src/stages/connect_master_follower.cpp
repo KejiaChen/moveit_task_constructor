@@ -323,6 +323,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   Eigen::Isometry3d follower_hand_start_pose;
   Eigen::Isometry3d follower_tip_start_pose;
+  Eigen::Quaterniond lead_hand_start_orientation;
   Eigen::Quaterniond follower_start_orientation; //TODO@KejiaChen: align y rotation to initial_state, the other to leader
   Eigen::Quaterniond follower_final_orientation(final_goal_state.getGlobalLinkTransform("left_panda_hand").rotation());
   // RCLCPP_INFO_STREAM(LOGGER, "Follower arm final orientation: " << follower_final_orientation.coeffs().transpose());
@@ -370,27 +371,27 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
     // set start tip orientation
     if (i == 0){
-      Eigen::Quaterniond lead_hand_start_orientation = Eigen::Quaterniond(original_pose.rotation());
-      
-      // Extract the rotation components
-      Eigen::Matrix3d initial_rotation_matrix = follower_initial_orientation.toRotationMatrix();
-      Eigen::Matrix3d start_rotation_matrix = lead_hand_start_orientation.toRotationMatrix();
+      lead_hand_start_orientation = Eigen::Quaterniond(original_pose.rotation());
 
-      // Extract Euler angles (Roll, Pitch, Yaw) from the matrices
-      Eigen::Vector3d initial_euler_angles = initial_rotation_matrix.eulerAngles(0, 1, 2);  // XYZ convention
-      Eigen::Vector3d start_euler_angles = start_rotation_matrix.eulerAngles(0, 1, 2);
-
-      // Extract roll (X) and pitch (Y) from the initial orientation
-      double initial_roll = initial_euler_angles[0];
-      double initial_pitch = initial_euler_angles[1];
-      // Extract yaw (Z) from the start orientation
-      double start_yaw = start_euler_angles[2];
-
-      // Create a combined rotation with roll and pitch from the initial orientation and yaw from the start orientation
-      Eigen::Quaterniond combined_orientation =
-          Eigen::AngleAxisd(initial_roll, Eigen::Vector3d::UnitX()) *
-          Eigen::AngleAxisd(initial_pitch, Eigen::Vector3d::UnitY()) *
-          Eigen::AngleAxisd(start_yaw, Eigen::Vector3d::UnitZ());
+      // Extract yaw angle from lead
+      Eigen::Matrix3d lead_rot = lead_hand_start_orientation.toRotationMatrix();
+      double yaw = std::atan2(lead_rot(1,0), lead_rot(0,0));  // equivalent to yaw from rotation matrix
+    
+      // Build a pure yaw rotation around world Z
+      Eigen::AngleAxisd yaw_rotation(yaw, Eigen::Vector3d::UnitZ());
+      Eigen::Quaterniond world_yaw_quat(yaw_rotation);
+    
+      // Apply yaw to follower's original orientation, but keep follower's roll/pitch
+      Eigen::Quaterniond follower_rot_no_yaw = follower_initial_orientation;
+    
+      // Remove yaw from follower by rotating back around world Z
+      Eigen::Matrix3d follower_rot = follower_initial_orientation.toRotationMatrix();
+      double follower_yaw = std::atan2(follower_rot(1,0), follower_rot(0,0));
+      Eigen::AngleAxisd follower_yaw_inv(-follower_yaw, Eigen::Vector3d::UnitZ());
+      Eigen::Quaterniond follower_rot_without_yaw(follower_yaw_inv * follower_rot);
+    
+      // Now apply lead's yaw
+      Eigen::Quaterniond combined_orientation = world_yaw_quat * follower_rot_without_yaw;
 
       // Set the follower's start orientation
       follow_tip_pose.linear() = combined_orientation.toRotationMatrix();
@@ -425,6 +426,8 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   // RCLCPP_INFO_STREAM(LOGGER, "Follower arm last orientation: " << last_orientation.coeffs().transpose());
 
   // Test if position follower_hand_start_pose == follower_hand_path[0]
+  RCLCPP_INFO_STREAM(LOGGER, "Leader arm first step should end at hand orientation: " << lead_hand_start_orientation.coeffs().transpose());
+
   Eigen::Vector3d start_hand_position = follower_hand_start_pose.translation();
   Eigen::Quaterniond start_hand_orientation(follower_hand_start_pose.rotation());
   start_hand_orientation.normalize();
