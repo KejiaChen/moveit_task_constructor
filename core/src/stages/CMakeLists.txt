@@ -19,6 +19,8 @@ add_library(${PROJECT_NAME}_stages SHARED
 
 	${PROJECT_INCLUDE}/stages/connect.h
 	${PROJECT_INCLUDE}/stages/connect_master_follower.h
+	${PROJECT_INCLUDE}/stages/connect_master_follower_sequence.h
+	${PROJECT_INCLUDE}/stages/connect_master_follower_parallel.h
 	${PROJECT_INCLUDE}/stages/move_to.h
 	${PROJECT_INCLUDE}/stages/move_relative.h
 	${PROJECT_INCLUDE}/stages/move_relative_multiple.h
@@ -46,6 +48,8 @@ add_library(${PROJECT_NAME}_stages SHARED
 
 	connect.cpp
 	connect_master_follower.cpp
+	connect_master_follower_sequence.cpp
+	connect_master_follower_parallel.cpp
 	move_to.cpp
 	move_relative.cpp
 	move_relative_multiple.cpp
