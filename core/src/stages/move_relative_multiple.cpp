@@ -522,7 +522,13 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 	scene->getCurrentStateNonConst().update();
 	// RCLCPP_INFO_STREAM(LOGGER, "State after MoveRelativeMultiple:\n" << getStatePositionsString(scene->getCurrentState()));
 
-	solution = *merge(overall_trajectories, state.scene(), state.scene()->getCurrentState());
+	auto merged = merge(overall_trajectories, state.scene(), state.scene()->getCurrentState());
+	if (!merged) {
+		solution.markAsFailure("Merged trajectory is invalid");
+		RCLCPP_WARN(LOGGER, "Merged trajectory was invalid. Trying next variant.");
+		return false;
+	}
+	solution = *merged;
 
 	return true;
 }
@@ -551,7 +557,7 @@ SubTrajectoryPtr MoveRelativeMultiple::merge(const std::vector<PlannerIdTrajecto
     auto merged_joint_model_group = merged_jmg_.get();
     if (!merged_joint_model_group) {
         RCLCPP_ERROR(LOGGER, "Merged Joint Model Group is not defined for MoveRelativeMultiple");
-        return SubTrajectoryPtr();
+        return nullptr;
     }
 
     // Retrieve time parameterization for merging
@@ -564,14 +570,14 @@ SubTrajectoryPtr MoveRelativeMultiple::merge(const std::vector<PlannerIdTrajecto
                                                                                      *timing);
     if (!merged_trajectory) {
         RCLCPP_ERROR(LOGGER, "Failed to merge trajectories");
-        return SubTrajectoryPtr();
+        return nullptr;
     }
 
     // Validate the merged trajectory for collisions
     if (!current_scene->isPathValid(*merged_trajectory,
                                     properties().get<moveit_msgs::msg::Constraints>("path_constraints"))) {
         RCLCPP_ERROR(LOGGER, "Merged trajectory is in collision");
-        return SubTrajectoryPtr();
+        return nullptr;
     }
 
 	RCLCPP_INFO_STREAM(LOGGER, "Merged trajectory has " << merged_trajectory->getWayPointCount() << " waypoints.");
