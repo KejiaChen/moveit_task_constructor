@@ -90,13 +90,15 @@ protected:
 private:
   bool computeFirstArmTrajectory(const InterfaceState& from, const InterfaceState& to,
                                   robot_trajectory::RobotTrajectoryPtr& first_arm_trajectory,
-                                  planning_scene::PlanningScenePtr& intermediate_scene);
+                                  planning_scene::PlanningScenePtr& intermediate_scene,
+                                  planning_scene::PlanningScenePtr& final_scene);
 
   bool computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
                                   std::vector<PlannerIdTrajectoryPair>& leader_trajectories,
                                   const InterfaceState& to,
                                   robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                   std::vector<PlannerIdTrajectoryPair>& follower_trajectories,
+                                  planning_scene::PlanningScenePtr& lead_intermediate_scene,
                                   planning_scene::PlanningScenePtr& lead_final_scene,
                                   std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
                                   bool reverse=false);
@@ -105,7 +107,7 @@ private:
                                           const moveit::core::RobotState& final_goal_state,
                                           std::vector<geometry_msgs::msg::Pose>& leader_tip_path,
                                           std::vector<double>& path_time,
-                                          int& start_index,
+                                          // int& start_index,
                                           double start_offset,
                                           robot_trajectory::RobotTrajectoryPtr& leader_track_trajectory
                                         );
@@ -136,6 +138,13 @@ private:
                                     const moveit::core::RobotState& follower_state,
                                     planning_scene::PlanningScenePtr& start,
                                     planning_scene::PlanningScenePtr& end);
+  
+  bool isTargetPoseCollidingInEEF(const planning_scene::PlanningSceneConstPtr& scene,
+                                  moveit::core::RobotState& robot_state, 
+                                  EigenSTL::vector_Isometry3d& poses,
+                                  std::vector<const moveit::core::LinkModel*>& links,
+                                  const moveit::core::JointModelGroup* jmg = nullptr,
+                                  collision_detection::CollisionResult* collision_result = nullptr);
 
   const moveit::core::JointModelGroup* follow_jmg_;
   const moveit::core::JointModelGroup* leader_jmg_;
@@ -144,6 +153,8 @@ private:
 
   Eigen::Isometry3d lead_hand_to_tcp_transform_;
   Eigen::Isometry3d follow_hand_to_tcp_transform_;
+
+  int leader_start_index_ = -1;
 };
 }  // namespace stages
 }  // namespace task_constructor

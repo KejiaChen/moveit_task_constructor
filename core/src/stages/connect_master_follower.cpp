@@ -84,6 +84,10 @@ ConnectMF::ConnectMF(const std::string& name, const GroupPlannerVector& planners
     p.declare<std::string>("follow_group", "left_panda_arm", "Group name of the follower.");
     p.declare<std::string>("dual_group", "dual_arm", "Group name of the dual arm.");
     p.declare<GroupStringDict>("eefs", "vector of names of end-effector group");
+    p.declare<double>("folllow_grasp_offset", 0.15, "offset of the follower's grasping point in clip frame");
+    p.declare<double>("track_offset", 0.1, "offset between leader and follower in leader's TCP frame");
+    p.declare<geometry_msgs::msg::PoseStamped>("lead_grasp_pose", geometry_msgs::msg::PoseStamped(),
+                                        "grasp pose of the leader arm in world frame");
 
     Eigen::Isometry3d default_hand_to_tcp_transform = Eigen::Isometry3d::Identity();
     default_hand_to_tcp_transform.translation().z() = 0.1034; // default z offset of the hand to TCP
@@ -106,14 +110,14 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
     planning_scene::PlanningSceneConstPtr start = from.scene();
     intermediate_scenes.push_back(start);
 
-    planning_scene::PlanningScenePtr intermediate_scene;
+    planning_scene::PlanningScenePtr leader_intermediate_scene = from.scene()->diff();
+    planning_scene::PlanningScenePtr leader_final_scene = from.scene()->diff();
     robot_trajectory::RobotTrajectoryPtr leader_trajectory;
     robot_trajectory::RobotTrajectoryPtr follower_trajectory;
-    intermediate_scene = from.scene()->diff();
-    moveit::core::RobotState intermediate_state = intermediate_scene->getCurrentStateNonConst();
+    // moveit::core::RobotState intermediate_state = intermediate_scene->getCurrentStateNonConst();
 
     // Step 1: Compute trajectory for the first arm
-    if (!computeFirstArmTrajectory(from, to, leader_trajectory, intermediate_scene)) {
+    if (!computeFirstArmTrajectory(from, to, leader_trajectory, leader_intermediate_scene, leader_final_scene)) {
         auto failed_solution = std::make_shared<SubTrajectory>();
         failed_solution->markAsFailure("Leader arm trajectory planning failed.");
         connect(from, to, failed_solution);
@@ -123,13 +127,12 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
     RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory computed with " << leader_trajectory->getWayPointCount() << " waypoints");
     RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory duration: " << leader_trajectory->getDuration());
 
-    // Update the leader arm's state in the intermediate scene
     // Update only the leader arm's joints in the intermediate scene
-    const moveit::core::RobotState& leader_final_state = leader_trajectory->getLastWayPoint();
-    std::vector<double> leader_joint_positions;
-    leader_final_state.copyJointGroupPositions(leader_jmg_, leader_joint_positions);
-    intermediate_state.setJointGroupPositions(leader_jmg_, leader_joint_positions);
-    intermediate_state.update();  // Ensure consistency
+    // const moveit::core::RobotState& leader_final_state = leader_trajectory->getLastWayPoint();
+    // std::vector<double> leader_joint_positions;
+    // leader_final_state.copyJointGroupPositions(leader_jmg_, leader_joint_positions);
+    // intermediate_state.setJointGroupPositions(leader_jmg_, leader_joint_positions);
+    // intermediate_state.update();  // Ensure consistency
 
     // intermediate_scenes.push_back(intermediate_scene->diff());
 
@@ -138,7 +141,9 @@ void ConnectMF::compute(const InterfaceState& from, const InterfaceState& to) {
     RCLCPP_INFO_STREAM(LOGGER, "Intermediate scene update");
     std::vector<PlannerIdTrajectoryPair> leader_trajectories;
     std::vector<PlannerIdTrajectoryPair> follower_trajectories;
-    if (!computeSecondArmTrajectory(leader_trajectory, leader_trajectories ,to, follower_trajectory, follower_trajectories, intermediate_scene, intermediate_scenes)) {
+    if (!computeSecondArmTrajectory(leader_trajectory, leader_trajectories ,to, follower_trajectory, follower_trajectories, leader_intermediate_scene, 
+                                  leader_final_scene, intermediate_scenes)) 
+    {
         auto failed_solution = std::make_shared<SubTrajectory>();
         failed_solution->markAsFailure("Follower arm trajectory planning failed.");
         connect(from, to, failed_solution);
@@ -199,7 +204,7 @@ bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::Robot
                                                    const moveit::core::RobotState& final_goal_state,
                                                    std::vector<geometry_msgs::msg::Pose>& leader_tip_path,
                                                    std::vector<double>& path_time,
-                                                   int& start_index,
+                                                  //  int& start_index,
                                                    double start_offset,
                                                    robot_trajectory::RobotTrajectoryPtr& leader_track_trajectory
                                                   ) {  
@@ -207,7 +212,7 @@ bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::Robot
   geometry_msgs::msg::Pose leader_start_hand_pose_msg;
   Eigen::Isometry3d leader_start_tip_pose;
 
-  bool start = false;
+  // bool start = false;
   for (size_t i = 0; i < leader_trajectory->getWayPointCount(); ++i) {
     const auto& point = leader_trajectory->getWayPoint(i);
     // Get the pose of the "leader_ee_link" in the world frame
@@ -223,39 +228,41 @@ bool ConnectMF::ExtractFirstArmCartesianTrajectory(const robot_trajectory::Robot
     Eigen::Isometry3d ee_link_pose = point.getGlobalLinkTransform(leader_ee_link); // hand pose
     // Apply the transform to get the pose of the actual end-effector
     Eigen::Isometry3d tip_pose = ee_link_pose * lead_hand_to_tcp_transform_;
-    // leader start pose
-    if (i == 0) {
-      tf2::convert(ee_link_pose, leader_start_hand_pose_msg);
-      leader_start_tip_pose = tip_pose;
-      continue;
-    }
-    
-    if (i > 0){
-      // check distance to the leader start point to decide the follower start point
-      double distance_from_start  = (tip_pose.translation() - leader_start_tip_pose.translation()).norm();
-      // Instead of strating from the first pose, start from the closest to the current pose of the follower arm
-      if (distance_from_start < start_offset) {
-        // RCLCPP_WARN(LOGGER, "Distance from the starting point is too narrow: %f", distance_from_start);
+    if (leader_start_index_ == -1){
+      // find leader start index based on the distance
+      // leader start pose
+      if (i == 0) {
+        tf2::convert(ee_link_pose, leader_start_hand_pose_msg);
+        leader_start_tip_pose = tip_pose;
         continue;
       }
-    }
+      
+      if (i > 0){
+        // check distance to the leader start point to decide the follower start point
+        double distance_from_start  = (tip_pose.translation() - leader_start_tip_pose.translation()).norm();
+        // Instead of strating from the first pose, start from the closest to the current pose of the follower arm
+        if (distance_from_start < start_offset) {
+          // RCLCPP_WARN(LOGGER, "Distance from the starting point is too narrow: %f", distance_from_start);
+          continue;
+        }
+      }
 
-    if (!start) {
-      start_index = i;
-      RCLCPP_INFO_STREAM(LOGGER, "Follower starts tracking from waypoint index: " << start_index);
-      start = true;
-    }
-
-    leader_track_trajectory->addSuffixWayPoint(leader_trajectory->getWayPoint(i), leader_trajectory->getWayPointDurationFromStart(i));
+      leader_start_index_ = i;
+      RCLCPP_INFO_STREAM(LOGGER, "Follower starts tracking from waypoint index: " << leader_start_index_);
+    }else{
+      if (i > leader_start_index_){
+        leader_track_trajectory->addSuffixWayPoint(leader_trajectory->getWayPoint(i), leader_trajectory->getWayPointDurationFromStart(i));
     
-    // Convert to geometry_msgs::Pose
-    geometry_msgs::msg::Pose pose;
-    tf2::convert(tip_pose, pose);
-    leader_tip_path.push_back(pose);
+        // Convert to geometry_msgs::Pose
+        geometry_msgs::msg::Pose pose;
+        tf2::convert(tip_pose, pose);
+        leader_tip_path.push_back(pose);
 
-    // log the time for each point
-    path_time.push_back(leader_trajectory->getWayPointDurationFromStart(i));
-
+        // log the time for each point
+        path_time.push_back(leader_trajectory->getWayPointDurationFromStart(i));
+      }
+    } 
+    
   }
 
   if (leader_tip_path.empty()) {
@@ -272,6 +279,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
                                           robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                           std::vector<PlannerIdTrajectoryPair>& follower_trajectories,
                                           // robot_trajectory::RobotTrajectoryPtr& dual_trajectory,
+                                          planning_scene::PlanningScenePtr& lead_intermediate_scene,
                                           planning_scene::PlanningScenePtr& lead_final_scene,
                                           std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
                                           bool reverse) {
@@ -283,8 +291,10 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
   Eigen::Quaterniond follower_initial_orientation(initial_state.getGlobalLinkTransform("left_panda_hand").rotation());
 
-  double start_offset = 0.15;
-  double track_offset = 0.1;
+  // double start_offset = 0.15;
+  double track_offset = props.get<double>("track_offset");
+  double grasp_follower_offset = props.get<double>("folllow_grasp_offset");
+  double grasp_leader_offset = track_offset + grasp_follower_offset; // not used if leader_start_index_ is already set
 
 //   // validate the updated state
 //   moveit::core::RobotState intermediate_state = final_scene->getCurrentStateNonConst();
@@ -303,14 +313,14 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   /* Extract the Cartesian trajectory of the first arm */ 
   std::vector<geometry_msgs::msg::Pose> leader_tip_path;
   std::vector<double> path_time_sequnce;
-  int leader_start_index = 0;
+  // int leader_start_index = 0;
 
   double leader_duration_original = leader_trajectory->getDuration();
   RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory duration: " << leader_duration_original);
   
   auto leader_track_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_trajectory->getRobotModel(), leader_jmg_);
   if (!ExtractFirstArmCartesianTrajectory(leader_trajectory, final_goal_state, leader_tip_path, path_time_sequnce, 
-                                          leader_start_index, start_offset, leader_track_trajectory)) {
+                                          grasp_leader_offset, leader_track_trajectory)) {
     RCLCPP_INFO_STREAM(LOGGER, "Failed to extract leader arm Cartesian trajectory.");
     return false;
   }
@@ -375,17 +385,15 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
       // Extract yaw angle from lead
       Eigen::Matrix3d lead_rot = lead_hand_start_orientation.toRotationMatrix();
-      double yaw = std::atan2(lead_rot(1,0), lead_rot(0,0));  // equivalent to yaw from rotation matrix
+      double yaw = std::atan2(lead_rot(1, 0), lead_rot(0, 0));  // equivalent to yaw from rotation matrix
     
       // Build a pure yaw rotation around world Z
       Eigen::AngleAxisd yaw_rotation(yaw, Eigen::Vector3d::UnitZ());
       Eigen::Quaterniond world_yaw_quat(yaw_rotation);
     
-      // Apply yaw to follower's original orientation, but keep follower's roll/pitch
-      Eigen::Quaterniond follower_rot_no_yaw = follower_initial_orientation;
-    
       // Remove yaw from follower by rotating back around world Z
-      Eigen::Matrix3d follower_rot = follower_initial_orientation.toRotationMatrix();
+      // Eigen::Matrix3d follower_rot = follower_initial_orientation.toRotationMatrix();
+      Eigen::Matrix3d follower_rot = follower_final_orientation.toRotationMatrix();
       double follower_yaw = std::atan2(follower_rot(1,0), follower_rot(0,0));
       Eigen::AngleAxisd follower_yaw_inv(-follower_yaw, Eigen::Vector3d::UnitZ());
       Eigen::Quaterniond follower_rot_without_yaw(follower_yaw_inv * follower_rot);
@@ -395,6 +403,11 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
 
       // Set the follower's start orientation
       follow_tip_pose.linear() = combined_orientation.toRotationMatrix();
+
+      // validate if the follow_tip_pose has collision-free EEF
+      // collision_detection::CollisionResult collisions;
+      // bool colliding  = isTargetPoseCollidingInEEF(lead_intermediate_scene, sandbox_state, multiple_target_pose, multiple_tip_links, 
+      //                                             lead_intermediate_scene->getRobotModel()->getJointModelGroup(props.get<std::string>("dual_group")), &collisions);
     }
 
     // pose at hand
@@ -456,9 +469,9 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   // visual_tools_.publishPath(follower_tip_path, rviz_visual_tools::YELLOW, rviz_visual_tools::MEDIUM);
   // visual_tools_.trigger();
 
-  /********************************************************************/
-  /*** Step 1: Move second arm to the first arm's starting position ***/
-  /********************************************************************/
+  /*********************************************************/
+  /*** Step 1: Move second arm to the grasping position ***/
+  /*********************************************************/
   bool success=false;
   robot_trajectory::RobotTrajectoryPtr follower_to_start_trajectory;
   std::vector<robot_trajectory::RobotTrajectoryPtr> leader_to_start_trajectories;
@@ -538,7 +551,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   auto delayed_follower_to_start_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(follower_to_start_trajectory->getRobotModel(), follow_jmg_);
   // Get the time when finishing the first step
   double first_step_end_time = follower_to_start_trajectory->getWayPointDurationFromStart(follower_to_start_trajectory->getWayPointCount());
-  double leader_first_step_end_time = leader_trajectory->getWayPointDurationFromStart(leader_start_index);
+  double leader_first_step_end_time = leader_trajectory->getWayPointDurationFromStart(leader_start_index_);
 
   double leader_second_step_start_time = leader_first_step_end_time;
   double leader_second_step_end_time = leader_duration_original;
@@ -548,7 +561,7 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
     double pause_duration = first_step_end_time;
     RCLCPP_INFO_STREAM(LOGGER, "Pause duration: " << pause_duration);
     auto leader_first_trajectory_with_pause = std::make_shared<robot_trajectory::RobotTrajectory>(leader_trajectory->getRobotModel(), leader_jmg_);
-    if (!splitTrajectoryWithPause(leader_trajectory, pause_duration, leader_start_index, leader_first_trajectory_with_pause, leader_to_start_trajectories, false)) {
+    if (!splitTrajectoryWithPause(leader_trajectory, pause_duration, leader_start_index_, leader_first_trajectory_with_pause, leader_to_start_trajectories, false)) {
       RCLCPP_ERROR(LOGGER, "Failed to split the leader trajectory.");
       return false;
     }
@@ -584,6 +597,11 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   if (leader_to_start_trajectories[0]->getWayPointCount() != follower_to_start_trajectories[0]->getWayPointCount()) {
     RCLCPP_ERROR(LOGGER, "Leader and follower trajectories have different number of waypoints for phase 1! Leader: %zu, Follower: %zu",
                  leader_to_start_trajectories[0]->getWayPointCount(), follower_to_start_trajectories[0]->getWayPointCount());
+    int add_count = leader_to_start_trajectories[0]->getWayPointCount() - follower_to_start_trajectories[0]->getWayPointCount();
+    for (size_t i = 0; i < add_count; ++i) {
+      follower_to_start_trajectories[0]->addSuffixWayPoint(follower_to_start_trajectories[0]->getLastWayPoint(), follower_to_start_trajectories[0]->getWayPointDurationFromStart(follower_to_start_trajectories[0]->getWayPointCount()));
+    }
+    RCLCPP_INFO_STREAM(LOGGER, "Follower arm trajectory updated with additional pause to " << follower_to_start_trajectories[0]->getWayPointCount() << " waypoints");
   }
   leader_trajectories.push_back({"leader_arm", leader_to_start_trajectories[0]});
   follower_trajectories.push_back({"follower_arm", follower_to_start_trajectories[0]});
@@ -596,11 +614,11 @@ bool ConnectMF::computeSecondArmTrajectory(robot_trajectory::RobotTrajectoryPtr&
   if (leader_to_start_trajectories[1]->getWayPointCount() != follower_to_start_trajectories[1]->getWayPointCount()) {
     RCLCPP_ERROR(LOGGER, "Leader and follower trajectories have different number of waypoints for phase 2! Leader: %zu, Follower: %zu",
                  leader_to_start_trajectories[1]->getWayPointCount(), follower_to_start_trajectories[1]->getWayPointCount());
-    int add_count = follower_trajectory->getWayPointCount() - leader_trajectory->getWayPointCount();
+    int add_count = follower_to_start_trajectories[1]->getWayPointCount() - leader_to_start_trajectories[1]->getWayPointCount();
     for (size_t i = 0; i < add_count; ++i) {
-      leader_trajectory->addSuffixWayPoint(leader_trajectory->getLastWayPoint(), leader_trajectory->getWayPointDurationFromStart(leader_trajectory->getWayPointCount()));
+      leader_to_start_trajectories[1]->addSuffixWayPoint(leader_to_start_trajectories[1]->getLastWayPoint(), leader_to_start_trajectories[1]->getWayPointDurationFromStart(leader_to_start_trajectories[1]->getWayPointCount()));
     }
-    RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory updated with additional pause to " << leader_trajectory->getWayPointCount() << " waypoints");
+    RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory updated with additional pause to " << leader_to_start_trajectories[1]->getWayPointCount() << " waypoints");
   }
   leader_trajectories.push_back({"leader_arm",leader_to_start_trajectories[1]});
   follower_trajectories.push_back({"follower_arm",follower_to_start_trajectories[1]});
@@ -850,43 +868,142 @@ void ConnectMF::updateDualIntermediateState(const moveit::core::RobotState& lead
 }
 
 bool ConnectMF::computeFirstArmTrajectory(const InterfaceState& from, const InterfaceState& to,
-                                               robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
-                                               planning_scene::PlanningScenePtr& intermediate_scene) {
+                                          robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
+                                          planning_scene::PlanningScenePtr& intermediate_scene,
+                                          planning_scene::PlanningScenePtr& final_scene) {
   const auto& props = properties();
-  const moveit::core::RobotState& final_goal_state = to.scene()->getCurrentState();
+  const moveit::core::RobotState& final_state = to.scene()->getCurrentState();
   const auto& path_constraints = props.get<moveit_msgs::msg::Constraints>("path_constraints");
 
   RCLCPP_INFO(LOGGER, "Computing trajectory for the leader arm.");
 
-  bool success=false;
+  double track_offset = props.get<double>("track_offset");
+  double grasp_follower_offset = props.get<double>("folllow_grasp_offset");
+  double grasp_leader_offset = track_offset + grasp_follower_offset;
 
+  /* Option 1: Direct planning to the final scene*/
+  // // Plan joint trajectory for the leader arm
+  // for (const auto& pair : planner_) {
+  //   if (pair.first == props.get<std::string>("lead_group")) {
+  //     planning_scene::PlanningSceneConstPtr start = from.scene();
+  //     leader_jmg_ = final_state.getJointModelGroup(pair.first);
+  //     RCLCPP_INFO_STREAM(LOGGER, "leader group name: " << leader_jmg_->getName());
+  //     final_scene = start->diff();
+  //     moveit::core::RobotState& goal_state = final_scene->getCurrentStateNonConst();
+
+  //     // Set the joint group goal
+  //     std::vector<double> positions;
+  //     final_state.copyJointGroupPositions(leader_jmg_, positions);
+  //     goal_state.setJointGroupPositions(leader_jmg_, positions);
+  //     goal_state.update();
+
+  //     // Plan trajectory
+  //     auto result = pair.second->plan(start, final_scene, leader_jmg_, props.get<double>("timeout"),
+  //                                     leader_trajectory, path_constraints);
+
+  //     if (!result) {
+  //       RCLCPP_ERROR(LOGGER, "Leader arm planning from intermediate to final failed.");
+  //       return false;
+  //     }
+
+  //     RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory planning success ");
+
+  //     return true;
+  //   }
+  // }
+  // return false;
+
+  /* Option 2: Passing intermediate waypoint*/
+  planning_scene::PlanningSceneConstPtr start = from.scene();
+  leader_trajectory.reset(new robot_trajectory::RobotTrajectory(start->getRobotModel(), leader_jmg_));
+  
+  robot_trajectory::RobotTrajectoryPtr traj_1;
+                                            
+  for (const auto& pair: cartesian_planner_) {
+    if (pair.first == props.get<std::string>("lead_group")) {
+
+      leader_jmg_ = final_state.getJointModelGroup(pair.first);
+
+      const moveit::core::RobotState& start_state = start->getCurrentState();
+      const moveit::core::LinkModel* eef_link = start_state.getLinkModel("right_panda_hand");
+
+      // Get current pose of EEF in world frame
+      Eigen::Isometry3d current_pose = start_state.getGlobalLinkTransform(eef_link);
+      RCLCPP_INFO_STREAM(LOGGER, "Leader arm current pose: " << current_pose.translation().transpose());
+
+      // Offset from current link frame to ik_frame (used by solver)
+      Eigen::Isometry3d offset = current_pose.inverse() * current_pose;  // Identity in this case, because ik_pose_world = current
+
+      // Option 1: Get the leader_grasp_pose in world frame as target
+      geometry_msgs::msg::PoseStamped leader_grasp_pos_msg = props.get<geometry_msgs::msg::PoseStamped>("lead_grasp_pose");
+      Eigen::Isometry3d leader_grasp_pose_tcp;
+      tf2::fromMsg(leader_grasp_pos_msg.pose, leader_grasp_pose_tcp);
+      Eigen::Isometry3d leader_grasp_pose_eef = leader_grasp_pose_tcp * (lead_hand_to_tcp_transform_).inverse();
+      Eigen::Isometry3d target_pose = leader_grasp_pose_eef;
+      
+      // // Option 2: Get the leader_grasp_pose in EEF frame as target
+      // // Apply local +X offset
+      // Eigen::Isometry3d target_pose = current_pose * Eigen::Translation3d(grasp_leader_offset, 0.0, 0.0);
+      
+      RCLCPP_INFO_STREAM(LOGGER, "Leader arm grasp pose: " << target_pose.translation().transpose());
+
+      // Call the correct `plan()` method
+      auto result_1 = pair.second->plan(start, *eef_link, offset, target_pose, leader_jmg_,
+                                      props.get<double>("timeout"), traj_1, path_constraints);
+
+      if (!result_1) {
+        RCLCPP_ERROR(LOGGER, "Leader arm planning to intermediate pose failed.");
+        return false;
+      }
+
+    }
+  }
+
+  if (!traj_1->empty()) {
+    intermediate_scene = start->diff();
+    moveit::core::RobotState& intermediate_state = intermediate_scene->getCurrentStateNonConst();
+    const moveit::core::RobotState& traj1_final_state = traj_1->getLastWayPoint();
+    std::vector<double> intermediate_positions;
+    traj1_final_state.copyJointGroupPositions(leader_jmg_, intermediate_positions);
+    intermediate_state.setJointGroupPositions(leader_jmg_, intermediate_positions);
+    intermediate_state.update();
+
+    // print the trajectory
+    // std::cout << "Leader arm trajectory:" << std::endl;
+    // traj_1->print(std::cout);
+
+    leader_trajectory = traj_1;
+    leader_start_index_ = leader_trajectory->getWayPointCount();
+    RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory start index: " << leader_start_index_);
+  } else {
+    RCLCPP_WARN(LOGGER, "Cartesian trajectory is empty.");
+  }
+  
   // Plan joint trajectory for the leader arm
   for (const auto& pair : planner_) {
     if (pair.first == props.get<std::string>("lead_group")) {
-      planning_scene::PlanningSceneConstPtr start = from.scene();
-      leader_jmg_ = final_goal_state.getJointModelGroup(pair.first);
-      RCLCPP_INFO_STREAM(LOGGER, "leader group name: " << leader_jmg_->getName());
-      intermediate_scene = start->diff();
-      moveit::core::RobotState& goal_state = intermediate_scene->getCurrentStateNonConst();
 
-      // Set the joint group goal
-      std::vector<double> positions;
-      final_goal_state.copyJointGroupPositions(leader_jmg_, positions);
-      goal_state.setJointGroupPositions(leader_jmg_, positions);
+      // ---- Step 3: Plan from intermediate to final ----
+      final_scene = start->diff();
+      // update only lead_jmg_
+      moveit::core::RobotState& goal_state = final_scene->getCurrentStateNonConst();
+      std::vector<double> goal_positions;
+      final_state.copyJointGroupPositions(leader_jmg_, goal_positions);
+      goal_state.setJointGroupPositions(leader_jmg_, goal_positions);
       goal_state.update();
 
       // Plan trajectory
-      auto result = pair.second->plan(start, intermediate_scene, leader_jmg_, props.get<double>("timeout"),
-                                      leader_trajectory, path_constraints);
-      success = bool(result);
-
-      if (!success) {
-        RCLCPP_ERROR_STREAM(LOGGER, "Leader arm trajectory planning failed: " << result.message);
-        break;
+      robot_trajectory::RobotTrajectoryPtr traj_2(new robot_trajectory::RobotTrajectory(start->getRobotModel(), leader_jmg_));
+      auto result_2 = pair.second->plan(intermediate_scene, final_scene, leader_jmg_, props.get<double>("timeout"),
+                                      traj_2, path_constraints);
+      if (!result_2) {
+        RCLCPP_ERROR(LOGGER, "Leader arm planning from intermediate to final failed.");
+        return false;
       }
       
-      RCLCPP_INFO_STREAM(LOGGER, "Leader arm trajectory planning result: " << success);
-      
+      // ---- Step 4: Concatenate and assign ----
+      leader_trajectory->append(*traj_2, 0.0);
+
       return true;
     }
   }
@@ -1121,6 +1238,68 @@ single_group_state.setJointGroupAccelerations(group, joint_accelerations);
 // Update the state to ensure consistency
 single_group_state.update();
 }
+
+bool ConnectMF::isTargetPoseCollidingInEEF(const planning_scene::PlanningSceneConstPtr& scene,
+                                          moveit::core::RobotState& robot_state, 
+                                          EigenSTL::vector_Isometry3d& poses,
+                                          std::vector<const moveit::core::LinkModel*>& links,
+                                          const moveit::core::JointModelGroup* jmg,
+                                          collision_detection::CollisionResult* collision_result) {
+if (poses.size() != links.size())
+{
+  RCLCPP_ERROR(LOGGER, "The number of poses does not match the number of links.");
+  return false;
+}
+
+for (size_t i = 0; i < links.size(); ++i)
+{
+  const moveit::core::LinkModel* link = links[i];
+  Eigen::Isometry3d& pose = poses[i];
+
+  // consider all rigidly connected parent links as well
+  const moveit::core::LinkModel* parent = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link);
+  Eigen::Isometry3d transformed_pose = pose;
+  if (parent != link)  
+  // ensure that the collision check considers the entire rigidly connected structure of the end-effector, not just the specified link
+  transformed_pose = pose * robot_state.getGlobalLinkTransform(link).inverse() * robot_state.getGlobalLinkTransform(parent);
+
+  // place links at given pose
+  robot_state.updateStateWithLinkAt(parent, transformed_pose);
+}
+
+robot_state.updateCollisionBodyTransforms();
+
+// disable collision checking for parent links (except links fixed to root)
+auto acm = scene->getAllowedCollisionMatrix();
+for (size_t i = 0; i < links.size(); ++i){
+  std::vector<const std::string*> pending_links;  // parent link names that might be rigidly connected to root
+  const moveit::core::LinkModel* link = links[i];
+  const moveit::core::LinkModel* parent = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link);
+  while (parent) {
+    pending_links.push_back(&parent->getName());
+    auto link_ = parent;
+    const moveit::core::JointModel* joint = link_->getParentJointModel();
+    parent = joint->getParentLinkModel();
+
+    if (joint->getType() != moveit::core::JointModel::FIXED) { //except links fixed to root
+      for (const std::string* name : pending_links)
+      acm.setDefaultEntry(*name, true);
+      pending_links.clear();
+    }
+  }
+}
+
+// check collision with the world using the padded version
+collision_detection::CollisionRequest req;
+collision_detection::CollisionResult result;
+req.contacts = (collision_result != nullptr);
+if (jmg)
+req.group_name = jmg->getName();
+collision_detection::CollisionResult& res = collision_result ? *collision_result : result;
+scene->checkCollision(req, res, robot_state, acm);
+return res.collision;
+}
+
 
 }  // namespace connect_master_follower
 }  // namespace task_constructor
