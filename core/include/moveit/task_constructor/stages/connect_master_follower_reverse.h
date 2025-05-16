@@ -150,6 +150,14 @@ private:
   Eigen::Quaterniond combineRotations(Eigen::Quaterniond grasp_orientation, 
                                       Eigen::Quaterniond clip_orientation);
 
+  moveit_msgs::msg::Constraints setLineConstraint(planning_scene::PlanningSceneConstPtr start,
+                                                planning_scene::PlanningSceneConstPtr end,
+                                                std::string constraint_link_name);
+
+  moveit_msgs::msg::Constraints setBoxConstraint(planning_scene::PlanningSceneConstPtr start,
+                                                    planning_scene::PlanningSceneConstPtr end,
+                                                    std::string constraint_link_name);
+  
   const moveit::core::JointModelGroup* follow_jmg_;
   const moveit::core::JointModelGroup* leader_jmg_;
   moveit::planning_interface::MoveGroupInterfacePtr move_group_lead_;

@@ -540,7 +540,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   // Find the corresponding follower trajectory point for each leader trajectory point with desried distance plus/minus tolerance
   double start_arc_percent = 0.0;
   double end_arc_percent = 1.0;
-  double tolerance = 0.005; // 5mm
+  double tolerance = 0.002; // 5mm
   for (size_t i = 0; i < leader_track_trajectory->getWayPointCount(); ++i) {
     double lead_arc_length = leader_track_trajectory->getWayPointDistanceFromStart(i);
     const moveit::core::RobotState& leader_state = leader_track_trajectory->getWayPoint(i);
@@ -557,11 +557,28 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
 
       // check the distance between the follower and leader trajectory
       Eigen::Isometry3d follower_tip_transform = follower_interpolated_state->getGlobalLinkTransform("left_panda_hand") * follow_hand_to_tcp_transform_;
-      double distance = (follower_tip_transform.translation() - leader_tip_transform.translation()).norm();
-    //   std::cout << "follower tip: "<< follower_tip_transform.translation().transpose() << " distance: " << distance << std::endl;
+    //   double distance = (follower_tip_transform.translation() - leader_tip_transform.translation()).norm();
+    // //   std::cout << "follower tip: "<< follower_tip_transform.translation().transpose() << " distance: " << distance << std::endl;
 
-      if (abs(distance - track_offset) < tolerance) {
-        RCLCPP_INFO_STREAM(LOGGER, "Point "<< i<<" Arc length: " << follower_arc_length << ", distance: " << distance);
+    //   if (abs(distance - track_offset) < tolerance) {
+    //     RCLCPP_INFO_STREAM(LOGGER, "Point "<< i<<" Arc length: " << follower_arc_length << ", distance: " << distance);
+    //     follower_track_resample_trajectory->addSuffixWayPoint(follower_interpolated_state, 0.1);
+
+    //     start_arc_percent = s;
+    //     match_found = true;
+    //     break;
+    //   }
+
+      Eigen::Vector3d difference_vector = follower_tip_transform.translation() - leader_tip_transform.translation();
+      Eigen::Vector3d desired_vector(-track_offset, 0, 0);
+      Eigen::Vector3d desired_vector_world = leader_tip_transform.rotation() * desired_vector;
+      double alignment = difference_vector.normalized().dot(desired_vector_world.normalized());
+      double magnitude_difference = (difference_vector.norm() - desired_vector_world.norm());
+
+      if (std::abs(magnitude_difference) < tolerance && alignment > 0.99) {
+        RCLCPP_INFO_STREAM(LOGGER, "Point " << i << " Arc length: " << follower_arc_length
+                                            << ", distance: " << difference_vector.norm()
+                                            << ", alignment: " << alignment);
         follower_track_resample_trajectory->addSuffixWayPoint(follower_interpolated_state, 0.1);
 
         start_arc_percent = s;
@@ -646,9 +663,14 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     if (pair.first == props.get<std::string>("lead_group")) {
       planning_scene::PlanningSceneConstPtr end = goal_scene;
       planning_scene::PlanningSceneConstPtr start = tension_scene;
+
+      // add line constraint
+      std::string constraint_link = "right_panda_hand";
+    //   auto line_constraint = setLineConstraint(start, end, constraint_link);
+      auto constraint = setBoxConstraint(start, end, constraint_link);
       
       // Plan trajectory
-      auto result = pair.second->plan(start, end, leader_jmg_, props.get<double>("timeout"), leader_to_goal_trajectory);
+      auto result = pair.second->plan(start, end, leader_jmg_, props.get<double>("timeout"), leader_to_goal_trajectory, constraint);
       success = bool(result);
 
       if (!success) {
@@ -691,7 +713,6 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
 
     // follower_second_step_start_time = follower_second_step_start_time + pause_duration;
     // follower_second_step_end_time = follower_second_step_end_time + pause_duration;
-
    
   }
 
@@ -1073,6 +1094,8 @@ bool ConnectMFReverse::splitTrajectoryWithPause(const robot_trajectory::RobotTra
     split_trajectory->append(*second_part, 0.0);
     split_trajectories.push_back(second_part);
   }
+  
+  // TODO@KejiaChen: check if the orientation is aligned
 
   std::cout << "Split trajectory has " << split_trajectory->getWayPointCount() << " waypoints." << std::endl;
   return true;
@@ -1235,6 +1258,105 @@ Eigen::Quaterniond ConnectMFReverse::combineRotations(Eigen::Quaterniond grasp_o
     Eigen::Quaterniond combined_orientation = grasp_yaw_quat * clip_rot_without_yaw;
 
     return combined_orientation;
+}
+
+moveit_msgs::msg::Constraints ConnectMFReverse::setLineConstraint(planning_scene::PlanningSceneConstPtr start,
+                                                                planning_scene::PlanningSceneConstPtr end,
+                                                                std::string constraint_link_name)
+{
+  // Define a straight-line path constraint
+  moveit_msgs::msg::Constraints path_constraints;
+  moveit_msgs::msg::PositionConstraint position_constraint;
+
+  position_constraint.header.frame_id = "world";  // Reference frame for the constraint
+  position_constraint.link_name = constraint_link_name;  // End-effector link
+
+  // Define the constraint region as a cylinder along the straight line
+  shape_msgs::msg::SolidPrimitive constraint_region;
+  constraint_region.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
+  constraint_region.dimensions = {0.1, 0.02};  // Height (length of the line) and radius
+
+  // Compute the midpoint of the straight line
+  Eigen::Vector3d start_position = start->getCurrentState().getGlobalLinkTransform(constraint_link_name).translation();
+  Eigen::Vector3d goal_position = end->getCurrentState().getGlobalLinkTransform(constraint_link_name).translation();
+  Eigen::Vector3d midpoint = (start_position + goal_position) / 2.0;
+
+  // Set the pose of the cylinder
+  geometry_msgs::msg::Pose constraint_pose;
+  constraint_pose.position.x = midpoint.x();
+  constraint_pose.position.y = midpoint.y();
+  constraint_pose.position.z = midpoint.z();
+
+  // Compute the orientation of the cylinder to align with the straight line
+  Eigen::Vector3d direction = (goal_position - start_position).normalized();
+  Eigen::Quaterniond orientation = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), direction);
+  constraint_pose.orientation.x = orientation.x();
+  constraint_pose.orientation.y = orientation.y();
+  constraint_pose.orientation.z = orientation.z();
+  constraint_pose.orientation.w = orientation.w();
+
+  position_constraint.constraint_region.primitives.push_back(constraint_region);
+  position_constraint.constraint_region.primitive_poses.push_back(constraint_pose);
+  position_constraint.weight = 1.0;  // Full weight for this constraint
+
+  path_constraints.position_constraints.push_back(position_constraint);
+
+  visual_tools_.publishCylinder(start_position, goal_position, rviz_visual_tools::TRANSLUCENT_DARK, rviz_visual_tools::SMALL, "line_constraint");
+  visual_tools_.trigger();
+
+  return path_constraints;
+}
+
+
+moveit_msgs::msg::Constraints ConnectMFReverse::setBoxConstraint(planning_scene::PlanningSceneConstPtr start,
+                                                                    planning_scene::PlanningSceneConstPtr end,
+                                                                    std::string constraint_link_name)
+{
+  Eigen::Isometry3d current_pose = start->getCurrentState().getGlobalLinkTransform(constraint_link_name);
+  Eigen::Isometry3d goal_pose = end->getCurrentState().getGlobalLinkTransform(constraint_link_name);
+
+  // Compute the box center and dimensions
+  geometry_msgs::msg::Pose box_pose;
+  box_pose.position.x = (current_pose.translation().x() + goal_pose.translation().x()) / 2.0;
+  box_pose.position.y = (current_pose.translation().y() + goal_pose.translation().y()) / 2.0;
+  box_pose.position.z = (current_pose.translation().z() + goal_pose.translation().z()) / 2.0;
+  box_pose.orientation.w = 1.0; // Identity quaternion for box orientation
+
+  shape_msgs::msg::SolidPrimitive box;
+  box.type = shape_msgs::msg::SolidPrimitive::BOX;
+  box.dimensions = {
+      fabs(goal_pose.translation().x() - current_pose.translation().x())+0.05,  // Length (x)
+      fabs(goal_pose.translation().y() - current_pose.translation().y())+0.05,  // Width (y)
+      fabs(goal_pose.translation().z() - current_pose.translation().z())+0.05   // Height (z)
+    };
+
+  // Create position constraint
+  moveit_msgs::msg::PositionConstraint box_constraint;
+  box_constraint.header.frame_id = "world"; // Replace with the appropriate reference frame
+  box_constraint.link_name = constraint_link_name; // Replace with the relevant link name
+  box_constraint.constraint_region.primitives.emplace_back(box);
+  box_constraint.constraint_region.primitive_poses.emplace_back(box_pose);
+  box_constraint.weight = 1.0;
+
+  // Visualize the box constraint
+  Eigen::Vector3d box_point_1(
+      box_pose.position.x - box.dimensions[0] / 2.0,
+      box_pose.position.y - box.dimensions[1] / 2.0,
+      box_pose.position.z - box.dimensions[2] / 2.0
+  );
+  Eigen::Vector3d box_point_2(
+      box_pose.position.x + box.dimensions[0] / 2.0,
+      box_pose.position.y + box.dimensions[1] / 2.0,
+      box_pose.position.z + box.dimensions[2] / 2.0
+  );
+  visual_tools_.publishCuboid(box_point_1, box_point_2, rviz_visual_tools::TRANSLUCENT_DARK);
+  visual_tools_.trigger();
+
+  // Wrap in a generic Constraints message
+  moveit_msgs::msg::Constraints box_constraints;
+  box_constraints.position_constraints.emplace_back(box_constraint);
+
+  return box_constraints;
 }
 
 }  // namespace connect_master_follower
