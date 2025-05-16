@@ -154,18 +154,22 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
     std::vector<PlannerIdTrajectoryPair> leader_trajectories;
     std::vector<PlannerIdTrajectoryPair> follower_trajectories;
     // Reverse the trajectory vectors
-    for (auto& reversed_trajectory_pair: reversed_leader_trajectories) {
-        auto& reversed_trajectory = reversed_trajectory_pair.trajectory;
-        auto trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*reversed_trajectory);
-        trajectory->reverse();
-        leader_trajectories.push_back({reversed_trajectory_pair.planner_id, trajectory});
+    for (int i = static_cast<int>(reversed_leader_trajectories.size()) - 1; i >= 0; --i) {
+    // for (int i = 0; i >= 0; --i) {
+        RCLCPP_INFO_STREAM(LOGGER, "Reversed subtrajectory " << i);
+        auto reversed_leader_trajectory_pair = reversed_leader_trajectories[i];
+        auto& reversed_leader_trajectory = reversed_leader_trajectory_pair.trajectory;
+        auto leader_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*reversed_leader_trajectory);
+        leader_trajectory->reverse();
+        leader_trajectories.push_back({reversed_leader_trajectory_pair.planner_id, leader_trajectory});
+
+        auto reversed_follower_trajectory_pair = reversed_follower_trajectories[i];
+        auto& reversed_follower_trajectory = reversed_follower_trajectory_pair.trajectory;
+        auto follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*reversed_follower_trajectory);
+        follower_trajectory->reverse();
+        follower_trajectories.push_back({reversed_follower_trajectory_pair.planner_id, follower_trajectory});
     }
-    for (auto& reversed_trajectory_pair: reversed_follower_trajectories) {
-        auto& reversed_trajectory = reversed_trajectory_pair.trajectory;
-        auto trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*reversed_trajectory);
-        trajectory->reverse();
-        follower_trajectories.push_back({reversed_trajectory_pair.planner_id, trajectory});
-    }
+
     // Reverse the trajectory
     auto leader_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*reversed_leader_trajectory);
     leader_trajectory->reverse();
@@ -454,27 +458,14 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   RCLCPP_INFO_STREAM(LOGGER, "leader arm first step should end at hand position: " << grasp_hand_position.transpose());
   RCLCPP_INFO_STREAM(LOGGER, "leader arm first step should end at hand orientation: " << grasp_hand_orientation.coeffs().transpose());
 
-//   Eigen::Vector3d path_hand_position(leader_hand_path[0].position.x, leader_hand_path[0].position.y, leader_hand_path[0].position.z);
-//   Eigen::Quaterniond path_hand_orientation(leader_hand_path[0].orientation.w, leader_hand_path[0].orientation.x, 
-//       leader_hand_path[0].orientation.y, leader_hand_path[0].orientation.z);
-//   path_hand_orientation.normalize();
-//   RCLCPP_INFO_STREAM(LOGGER, "leader arm second step shoud start from hand position: " << path_hand_position.transpose());
-//   RCLCPP_INFO_STREAM(LOGGER, "leader arm second step shoud start from hand orientation: " << path_hand_orientation.coeffs().transpose());
-
   // Test if position leader_hand_grasp_pose == leader_hand_path[0]
   Eigen::Vector3d grasp_tip_position = leader_tip_grasp_pose.translation();
   Eigen::Quaterniond grasp_tip_orientation(leader_tip_grasp_pose.rotation());
   RCLCPP_INFO_STREAM(LOGGER, "leader arm first step should end at tcp position: " << grasp_tip_position.transpose());
   RCLCPP_INFO_STREAM(LOGGER, "leader arm first step should end at tcp orientation: " << grasp_tip_orientation.coeffs().transpose());
 
-//   Eigen::Vector3d path_tip_position(leader_tip_path[0].position.x, leader_tip_path[0].position.y, leader_tip_path[0].position.z);
-//   Eigen::Quaterniond path_tip_orientation(leader_tip_path[0].orientation.w, leader_tip_path[0].orientation.x, leader_tip_path[0].orientation.y, 
-//     leader_tip_path[0].orientation.z);
-//   RCLCPP_INFO_STREAM(LOGGER, "leader arm second step shoud start from tcp position: " << path_tip_position.transpose());
-//   RCLCPP_INFO_STREAM(LOGGER, "leader arm second step shoud start from tcp orientation: " << path_tip_orientation.coeffs().transpose());
-
-  visual_tools_.publishPath(leader_tip_path, rviz_visual_tools::YELLOW, rviz_visual_tools::MEDIUM);
-  visual_tools_.trigger();
+//   visual_tools_.publishPath(leader_tip_path, rviz_visual_tools::YELLOW, rviz_visual_tools::MEDIUM);
+//   visual_tools_.trigger();
 
 //   check lead_tip_path
   for (size_t i = 0; i < leader_tip_path.size(); ++i) {
@@ -602,32 +593,16 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   planning_scene::PlanningScenePtr temp_start = start->diff();
   updateDualIntermediateState(leader_track_trajectory->getLastWayPoint(), follower_track_resample_trajectory->getLastWayPoint(), temp_start, phase_1_scene);
 
-//   // replace the first part of the follower trajectory with the resampled trajectory
-//   robot_trajectory::RobotTrajectoryPtr temp_follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(follower_trajectory->getRobotModel(), follow_jmg_);
-//   follower_trajectory = follower_track_resample_trajectory;
-  
-//   for (size_t i = 0; i > follower_start_index_; ++i) {
-//     follower_trajectory->addPrefixWayPoint(temp_follower_trajectory->getWayPoint(i), temp_follower_trajectory->getWayPointDurationFromStart(i));
-//   }
-//   follower_start_index_ = follower_trajectory->getWayPointCount();
-
   robot_trajectory::RobotTrajectoryPtr original_follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(follower_trajectory->getRobotModel(), follow_jmg_);
   // Append them to trajectory
-  leader_trajectory = leader_track_trajectory;
-  follower_trajectory = follower_track_resample_trajectory;
+  leader_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*leader_track_trajectory);
+  follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*follower_track_resample_trajectory);
   // Add them to the vector
   leader_trajectories.push_back({"leader_arm", leader_track_trajectory});
   follower_trajectories.push_back({"follower_arm", follower_track_resample_trajectory});
   
   // intermediate secene is added in a reverse order
   intermediate_scenes.push_back(phase_1_scene);
-
-  // dual_trajectory->append(*dual_track_trajectory, 0.0);
-
-  // // Get current orientation
-  // Eigen::Quaterniond next_reached_orientaiton(intermediate_scene->getCurrentState().getGlobalLinkTransform("left_panda_hand").rotation());
-  // RCLCPP_INFO_STREAM(LOGGER, "leader arm reached orientation after second step: " << next_reached_orientaiton.coeffs().transpose());
-
 
   /***********************************************************************************/
   /*** Step 2: BACKWARD Planning: Move both arms from grasping point to the start ***/
@@ -671,6 +646,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     if (pair.first == props.get<std::string>("lead_group")) {
       planning_scene::PlanningSceneConstPtr end = goal_scene;
       planning_scene::PlanningSceneConstPtr start = tension_scene;
+      
       // Plan trajectory
       auto result = pair.second->plan(start, end, leader_jmg_, props.get<double>("timeout"), leader_to_goal_trajectory);
       success = bool(result);
@@ -685,7 +661,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     }
   }
 
-  /* Time Adjustment */
+  /* Time Adjustment */ 
   RCLCPP_INFO_STREAM(LOGGER, "Adding pause for the leader and follower arm trajectories");
   auto delayed_leader_to_goal_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_to_goal_trajectory->getRobotModel(), leader_jmg_);
   // Get the time when finishing the first step
