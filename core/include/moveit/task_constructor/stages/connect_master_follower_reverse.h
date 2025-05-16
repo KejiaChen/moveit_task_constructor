@@ -95,7 +95,7 @@ private:
 
   bool computeFirstArmTrajectoryReverse(robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                         std::vector<PlannerIdTrajectoryPair>& follower_trajectories,
-                                        const InterfaceState& to,
+                                        planning_scene::PlanningSceneConstPtr& to_scene,
                                         robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
                                         std::vector<PlannerIdTrajectoryPair>& leader_trajectories,
                                         // robot_trajectory::RobotTrajectoryPtr& dual_trajectory,
@@ -109,6 +109,7 @@ private:
                                             std::vector<double>& path_time,
                                             //  int& start_index,
                                             double start_offset,
+                                            // robot_trajectory::RobotTrajectoryPtr& follower_grasp_trajectory,
                                             robot_trajectory::RobotTrajectoryPtr& follower_track_trajectory,
                                             bool reverse=false);
   
@@ -145,6 +146,9 @@ private:
                                   std::vector<const moveit::core::LinkModel*>& links,
                                   const moveit::core::JointModelGroup* jmg = nullptr,
                                   collision_detection::CollisionResult* collision_result = nullptr);
+
+  Eigen::Quaterniond combineRotations(Eigen::Quaterniond grasp_orientation, 
+                                      Eigen::Quaterniond clip_orientation);
 
   const moveit::core::JointModelGroup* follow_jmg_;
   const moveit::core::JointModelGroup* leader_jmg_;
