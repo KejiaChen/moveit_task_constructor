@@ -66,8 +66,9 @@ ConnectMFReverse::ConnectMFReverse(const std::string& name, const GroupPlannerVe
      visual_tools_(visual_tools),
      interpolation_planner_(interpolation_planners), 
      cartesian_planner_(cartesian_planners),
-     lead_hand_to_tcp_transform_(Eigen::Isometry3d::Identity()),
-     follow_hand_to_tcp_transform_(Eigen::Isometry3d::Identity()) 
+     hand_to_tcp_transform_(Eigen::Isometry3d::Identity()),  // panda hand to TCP transform
+     lead_flange_to_tcp_transform_(Eigen::Isometry3d::Identity()), // panda link8 to TCP transform
+     follow_flange_to_tcp_transform_(Eigen::Isometry3d::Identity())
 {
 	// setTimeout(1.0);
 	setCostTerm(std::make_unique<cost::PathLength>());
@@ -94,8 +95,16 @@ ConnectMFReverse::ConnectMFReverse(const std::string& name, const GroupPlannerVe
     Eigen::Isometry3d default_hand_to_tcp_transform = Eigen::Isometry3d::Identity();
     default_hand_to_tcp_transform.translation().z() = 0.1034; // default z offset of the hand to TCP
 
-    p.declare<Eigen::Isometry3d>("lead_hand_to_tcp_transform", default_hand_to_tcp_transform, "transform from lead hand to TCP");
-    p.declare<Eigen::Isometry3d>("follow_hand_to_tcp_transform", default_hand_to_tcp_transform, "transform from follow hand to TCP");
+    Eigen::Isometry3d default_flange_to_tcp_transform = default_hand_to_tcp_transform;
+    Eigen::Matrix3d leader_flange_to_hand_rotation;
+    leader_flange_to_hand_rotation << 0.7071, 0.7071, 0,
+                                    -0.7071, 0.7071, 0,
+                                    0, 0, 1;
+    default_flange_to_tcp_transform.linear() = leader_flange_to_hand_rotation * default_hand_to_tcp_transform.linear();
+
+    p.declare<Eigen::Isometry3d>("hand_to_tcp_transform", default_hand_to_tcp_transform, "transform from hand to TCP");
+    p.declare<Eigen::Isometry3d>("lead_flange_to_tcp_transform", default_flange_to_tcp_transform, "transform from lead flange (panda_link8) to TCP");
+    p.declare<Eigen::Isometry3d>("follow_flange_to_tcp_transform", default_flange_to_tcp_transform, "transform from follow flange (panda_link8) to TCP");
 }
 
 void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState& to) {
@@ -103,8 +112,9 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
 	double timeout = this->timeout();
 	MergeMode mode = props.get<MergeMode>("merge_mode");
 	double max_distance = props.get<double>("max_distance");
-    lead_hand_to_tcp_transform_ = props.get<Eigen::Isometry3d>("lead_hand_to_tcp_transform");
-    follow_hand_to_tcp_transform_ = props.get<Eigen::Isometry3d>("follow_hand_to_tcp_transform");
+    hand_to_tcp_transform_ = props.get<Eigen::Isometry3d>("hand_to_tcp_transform");
+    lead_flange_to_tcp_transform_ = props.get<Eigen::Isometry3d>("lead_flange_to_tcp_transform");
+    follow_flange_to_tcp_transform_ = props.get<Eigen::Isometry3d>("follow_flange_to_tcp_transform");
 
     RCLCPP_INFO_STREAM(LOGGER, "Computing dual-arm trajectory");
 
@@ -240,7 +250,7 @@ bool ConnectMFReverse::ExtractSecondArmCartesianTrajectory(const robot_trajector
     }
     Eigen::Isometry3d ee_link_pose = point.getGlobalLinkTransform(follower_ee_link); // hand pose
     // Apply the transform to get the pose of the actual end-effector
-    Eigen::Isometry3d tip_pose = ee_link_pose * follow_hand_to_tcp_transform_;
+    Eigen::Isometry3d tip_pose = ee_link_pose * hand_to_tcp_transform_;
     if (start_index== -1){
         // find follower start index based on the distance
         // follower start pose
@@ -402,7 +412,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
 
   // Define the transform from the tip frame to "leader_ee_link"
 //   Eigen::Isometry3d lead_hand_frame_transform = Eigen::Isometry3d::Identity();
-//   lead_hand_frame_transform.translation().z() = -lead_hand_to_tcp_transform_.translation().z();  // Offset along the Z-axis
+//   lead_hand_frame_transform.translation().z() = -hand_to_tcp_transform_.translation().z();  // Offset along the Z-axis
 
   int length = follower_tip_path.size();
   for (size_t i = 0; i < length; ++i) {
@@ -544,7 +554,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   for (size_t i = 0; i < leader_track_trajectory->getWayPointCount(); ++i) {
     double lead_arc_length = leader_track_trajectory->getWayPointDistanceFromStart(i);
     const moveit::core::RobotState& leader_state = leader_track_trajectory->getWayPoint(i);
-    Eigen::Isometry3d leader_tip_transform = leader_state.getGlobalLinkTransform("right_panda_hand") * lead_hand_to_tcp_transform_;
+    Eigen::Isometry3d leader_tip_transform = leader_state.getGlobalLinkTransform("right_panda_hand") * hand_to_tcp_transform_;
     // std::cout << "leader tip: "<< leader_tip_transform.translation().transpose()<<std::endl;
 
     bool match_found = false;  // Track if a match is found
@@ -556,7 +566,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
       follower_track_trajectory->getStateAtArcDistanceFromStart(follower_arc_length, follower_interpolated_state);
 
       // check the distance between the follower and leader trajectory
-      Eigen::Isometry3d follower_tip_transform = follower_interpolated_state->getGlobalLinkTransform("left_panda_hand") * follow_hand_to_tcp_transform_;
+      Eigen::Isometry3d follower_tip_transform = follower_interpolated_state->getGlobalLinkTransform("left_panda_hand") * hand_to_tcp_transform_;
     //   double distance = (follower_tip_transform.translation() - leader_tip_transform.translation()).norm();
     // //   std::cout << "follower tip: "<< follower_tip_transform.translation().transpose() << " distance: " << distance << std::endl;
 
@@ -857,7 +867,7 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       Eigen::Quaterniond combined_orientation = combineRotations(grasp_orientation, clip_orientation);
 
       follower_grasp_pose_tcp.linear() = combined_orientation.toRotationMatrix();
-      Eigen::Isometry3d follower_grasp_pose_eef = follower_grasp_pose_tcp * (follow_hand_to_tcp_transform_).inverse();
+      Eigen::Isometry3d follower_grasp_pose_eef = follower_grasp_pose_tcp * (hand_to_tcp_transform_).inverse();
 
       Eigen::Isometry3d target_pose = follower_grasp_pose_eef;
       Eigen::Quaterniond target_orientation(target_pose.rotation());
@@ -945,14 +955,15 @@ double ConnectMFReverse::FirstArmFollow(planning_scene::PlanningScenePtr& interm
   auto lead_scene = intermediate_scene->diff();
 
   // Define the transform from the "leader_ee_link" to the actual end-effector frame
-  Eigen::Matrix3d leader_flange_to_ee_rotation;
-  leader_flange_to_ee_rotation << 0.7071, 0.7071, 0,
-                            -0.7071, 0.7071, 0,
-                            0, 0, 1;
-  Eigen::Isometry3d lead_flange_to_tcp_transform = lead_hand_to_tcp_transform_;
-  // TODO@KejiaChen: AUTO CORRECT
-  lead_flange_to_tcp_transform.translation().z() = lead_flange_to_tcp_transform.translation().z() + 0.036;
-  lead_flange_to_tcp_transform.linear() = leader_flange_to_ee_rotation*lead_hand_to_tcp_transform_.linear();
+//   Eigen::Matrix3d leader_flange_to_ee_rotation;
+//   leader_flange_to_ee_rotation << 0.7071, 0.7071, 0,
+//                             -0.7071, 0.7071, 0,
+//                             0, 0, 1;
+//   Eigen::Isometry3d lead_flange_to_tcp_transform = hand_to_tcp_transform_;
+//   // TODO@KejiaChen: AUTO CORRECT
+//   lead_flange_to_tcp_transform.translation().z() = lead_flange_to_tcp_transform.translation().z() + 0.036;
+//   lead_flange_to_tcp_transform.linear() = leader_flange_to_ee_rotation*hand_to_tcp_transform_.linear();
+  Eigen::Isometry3d lead_flange_to_tcp_transform = props.get<Eigen::Isometry3d>("lead_flange_to_tcp_transform");
   RCLCPP_INFO_STREAM(LOGGER, "Leader arm flange to tcp translation: " << lead_flange_to_tcp_transform.translation().transpose() << 
                              " orientation: " << Eigen::Quaterniond(lead_flange_to_tcp_transform.rotation()).coeffs().transpose());
 
@@ -1349,8 +1360,8 @@ moveit_msgs::msg::Constraints ConnectMFReverse::setBoxConstraint(planning_scene:
       box_pose.position.y + box.dimensions[1] / 2.0,
       box_pose.position.z + box.dimensions[2] / 2.0
   );
-  visual_tools_.publishCuboid(box_point_1, box_point_2, rviz_visual_tools::TRANSLUCENT_DARK);
-  visual_tools_.trigger();
+//   visual_tools_.publishCuboid(box_point_1, box_point_2, rviz_visual_tools::TRANSLUCENT_DARK);
+//   visual_tools_.trigger();
 
   // Wrap in a generic Constraints message
   moveit_msgs::msg::Constraints box_constraints;
@@ -1358,6 +1369,61 @@ moveit_msgs::msg::Constraints ConnectMFReverse::setBoxConstraint(planning_scene:
 
   return box_constraints;
 }
+
+// Modified from ModifyPlanningScene stage
+// void ConnectMFReverse::addCollisionObject(const std::string& id, const Eigen::Isometry3d& pose,
+//                                             const moveit_msgs::msg::CollisionObject& collision_object)
+// {
+
+// }
+
+// void ConnectMFReverse::removeCollisionObject(const std::string& id)
+// {
+// }
+
+// void ConnectMFReverse::allowCollisions()
+// {
+
+// }
+
+// void ConnectMFReverse::attachCollisionCable(planning_scene::PlanningSceneConstPtr scene,
+//                                              const std::string& id, 
+//                                              double length,
+//                                              double radius,
+//                                              const std::string& attach_link, 
+//                                              std::vector<std::string> touch_links)
+// {
+//     moveit_msgs::msg::AttachedCollisionObject attach_msg;
+//     attach_msg.link_name = attach_link;
+//     attach_msg.object.header.frame_id = attach_link;
+//     attach_msg.object.id = "grasped_cable";
+
+//     // Add geometry
+//     shape_msgs::msg::SolidPrimitive prim;
+//     prim.type = prim.CYLINDER;
+//     prim.dimensions = {length, radius}; // height (along local Z), radius
+
+//     // Step 1: Create pose in TCP frame (cylinder lying along +X, end at origin)
+//     Eigen::Isometry3d cylinder_pose_tcp = Eigen::Isometry3d::Identity();
+//     // Rotate cylinder Z-axis → X-axis using +90° about Y
+//     cylinder_pose_tcp.linear() = Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitY()).toRotationMatrix();
+//     // Translate it so one end sits at TCP
+//     cylinder_pose_tcp.translation().x() = 0.5*length;
+//     // Step 2: Transform to `left_panda_hand` frame
+//     Eigen::Isometry3d cylinder_pose_in_hand = hand_to_tcp_transform_ * cylinder_pose_tcp;
+//     // Step 3: Convert to geometry_msgs::Pose
+//     geometry_msgs::msg::Pose pose_msg = tf2::toMsg(cylinder_pose_in_hand);
+
+//     attach_msg.object.primitives.push_back(prim);
+//     attach_msg.object.primitive_poses.push_back(pose_msg);
+//     attach_msg.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+
+//     // Ignore collision with the gripper
+//     attach_msg.touch_links = touch_links;
+
+//     scene->processAttachedCollisionObjectMsg(attach_msg);
+
+// }
 
 }  // namespace connect_master_follower
 }  // namespace task_constructor

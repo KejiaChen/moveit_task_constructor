@@ -163,8 +163,9 @@ private:
   moveit::planning_interface::MoveGroupInterfacePtr move_group_lead_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
 
-  Eigen::Isometry3d lead_hand_to_tcp_transform_;
-  Eigen::Isometry3d follow_hand_to_tcp_transform_;
+  Eigen::Isometry3d hand_to_tcp_transform_;
+  Eigen::Isometry3d lead_flange_to_tcp_transform_;
+  Eigen::Isometry3d follow_flange_to_tcp_transform_;
 
   int follower_start_index_ = -1;
   int reversed_follower_start_index_ = -1;
