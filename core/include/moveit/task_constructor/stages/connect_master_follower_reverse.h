@@ -91,7 +91,8 @@ private:
   bool computeSecondArmTrajectoryReverse(const InterfaceState& from, const InterfaceState& to,
                                         robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                         planning_scene::PlanningScenePtr& intermediate_scene,
-                                        planning_scene::PlanningScenePtr& final_scene); 
+                                        planning_scene::PlanningScenePtr& final_scene,
+                                        bool attach_object=false); 
 
   bool computeFirstArmTrajectoryReverse(robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                         std::vector<PlannerIdTrajectoryPair>& follower_trajectories,
@@ -157,6 +158,17 @@ private:
   moveit_msgs::msg::Constraints setBoxConstraint(planning_scene::PlanningSceneConstPtr start,
                                                     planning_scene::PlanningSceneConstPtr end,
                                                     std::string constraint_link_name);
+
+ void attachCollisionCable(planning_scene::PlanningScenePtr scene,
+                            const std::string& id, 
+                            double length,
+                            double radius,
+                            Eigen::Vector3d vec_in_world,
+                            const std::string& attach_link, 
+                            std::vector<std::string> touch_links);
+
+  void detachCollisionCable(planning_scene::PlanningScenePtr scene,
+                             const std::string& id);
   
   const moveit::core::JointModelGroup* follow_jmg_;
   const moveit::core::JointModelGroup* leader_jmg_;

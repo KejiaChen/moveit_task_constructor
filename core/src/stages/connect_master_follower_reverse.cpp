@@ -131,7 +131,7 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
     // moveit::core::RobotState intermediate_state = intermediate_scene->getCurrentStateNonConst();
 
     // Step 1: Compute trajectory for the first arm
-    if (!computeSecondArmTrajectoryReverse(from, to, reversed_follower_trajectory, follower_intermediate_scene, follower_final_scene)) {
+    if (!computeSecondArmTrajectoryReverse(from, to, reversed_follower_trajectory, follower_intermediate_scene, follower_final_scene, true)) {
         auto failed_solution = std::make_shared<SubTrajectory>();
         failed_solution->markAsFailure("Follower arm trajectory planning failed.");
         connect(from, to, failed_solution);
@@ -550,7 +550,8 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   // Find the corresponding follower trajectory point for each leader trajectory point with desried distance plus/minus tolerance
   double start_arc_percent = 0.0;
   double end_arc_percent = 1.0;
-  double tolerance = 0.002; // 5mm
+  double distance_tolerance = 0.003; // 5mm
+  double rotation_tolerance = 0.1; // 5 degree
   for (size_t i = 0; i < leader_track_trajectory->getWayPointCount(); ++i) {
     double lead_arc_length = leader_track_trajectory->getWayPointDistanceFromStart(i);
     const moveit::core::RobotState& leader_state = leader_track_trajectory->getWayPoint(i);
@@ -558,6 +559,9 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     // std::cout << "leader tip: "<< leader_tip_transform.translation().transpose()<<std::endl;
 
     bool match_found = false;  // Track if a match is found
+
+    // desired follower pose
+    Eigen::Isometry3d desired_follower_tip_transform = leader_tip_transform * Eigen::Translation3d(-track_offset, 0, 0);
 
     // search for the follower trajectory point with incremental of 0.002
     for (double s=start_arc_percent; s<=end_arc_percent; s+=0.001){
@@ -585,9 +589,18 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
       double alignment = difference_vector.normalized().dot(desired_vector_world.normalized());
       double magnitude_difference = (difference_vector.norm() - desired_vector_world.norm());
 
-      if (std::abs(magnitude_difference) < tolerance && alignment > 0.99) {
+      // difference between two pose
+      // Eigen::Vector3d translation_diff = desired_follower_tip_transform.translation() - follower_tip_transform.translation();
+      // double translation_distance = translation_diff.norm();
+      
+      // Eigen::Quaterniond desired_quat(desired_follower_tip_transform.rotation());
+      // Eigen::Quaterniond actual_quat(follower_tip_transform.rotation());
+      // double rotation_angle = desired_quat.angularDistance(actual_quat);
+
+      // if (std::abs(translation_distance) < distance_tolerance && std::abs(rotation_angle) < rotation_tolerance) {
+        if (std::abs(magnitude_difference) < distance_tolerance && alignment > 0.95) {
         RCLCPP_INFO_STREAM(LOGGER, "Point " << i << " Arc length: " << follower_arc_length
-                                            << ", distance: " << difference_vector.norm()
+                                            << ", distance: " << magnitude_difference
                                             << ", alignment: " << alignment);
         follower_track_resample_trajectory->addSuffixWayPoint(follower_interpolated_state, 0.1);
 
@@ -598,7 +611,8 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     }
 
     if (!match_found) {
-      RCLCPP_WARN_STREAM(LOGGER, "No matching point found for leader trajectory at index: " << i);
+      RCLCPP_ERROR_STREAM(LOGGER, "No matching point found for leader trajectory at index: " << i);
+      return false;
     }
   }
   
@@ -791,9 +805,11 @@ void ConnectMFReverse::updateDualIntermediateState(const moveit::core::RobotStat
 bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& from, const InterfaceState& to,
                                                         robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                                         planning_scene::PlanningScenePtr& intermediate_scene,
-                                                        planning_scene::PlanningScenePtr& final_scene) 
+                                                        planning_scene::PlanningScenePtr& final_scene,
+                                                        bool attach_object) 
 {
   const auto& props = properties();
+  const moveit::core::RobotState& start_state = to.scene()->getCurrentState();
   const moveit::core::RobotState& final_state = from.scene()->getCurrentState();
   const auto& path_constraints = props.get<moveit_msgs::msg::Constraints>("path_constraints");
 
@@ -836,12 +852,29 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
   // return false;
 
   /* Option 2: Passing intermediate waypoint*/
-  planning_scene::PlanningSceneConstPtr start = to.scene();
+  planning_scene::PlanningScenePtr start = to.scene()->diff();
   follower_trajectory.reset(new robot_trajectory::RobotTrajectory(start->getRobotModel(), follow_jmg_));
-  
+
+  Eigen::Isometry3d leader_hand_transform = start_state.getGlobalLinkTransform("right_panda_hand") * hand_to_tcp_transform_;
+  Eigen::Isometry3d follower_hand_transform = start_state.getGlobalLinkTransform("left_panda_hand") * hand_to_tcp_transform_;
+  Eigen::Vector3d cable_vector_in_wolrd = (leader_hand_transform.translation() - follower_hand_transform.translation()).normalized();
+
+//   const auto& acm = start->getAllowedCollisionMatrix();
+//   std::string finger_link = "left_panda_leftfinger";
+//   collision_detection::AllowedCollision::Type allowed;
+//     if (acm.getEntry(object_id, finger_link, allowed)) {
+//         RCLCPP_INFO_STREAM(LOGGER, "ACM entry (grasped_cable vs left_panda_leftfinger): "
+//                         << (allowed == collision_detection::AllowedCollision::ALWAYS ? "ALLOWED" : "NOT ALLOWED"));
+//     } else {
+//         RCLCPP_WARN_STREAM(LOGGER, "No ACM entry found for grasped_cable vs left_panda_leftfinger.");
+//     }
+                      
+
+  // ---- Step 1: Plan from goal to grasping ----
   robot_trajectory::RobotTrajectoryPtr traj_1;
-                                            
+  robot_trajectory::RobotTrajectoryPtr traj_cartesian;
   for (const auto& pair: cartesian_planner_) {
+  // for (const auto& pair: planner_) {
     if (pair.first == props.get<std::string>("follow_group")) {
 
       follow_jmg_ = final_state.getJointModelGroup(pair.first);
@@ -865,7 +898,6 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       Eigen::Quaterniond grasp_orientation(follower_grasp_pose_tcp.rotation());
       
       Eigen::Quaterniond combined_orientation = combineRotations(grasp_orientation, clip_orientation);
-
       follower_grasp_pose_tcp.linear() = combined_orientation.toRotationMatrix();
       Eigen::Isometry3d follower_grasp_pose_eef = follower_grasp_pose_tcp * (hand_to_tcp_transform_).inverse();
 
@@ -882,17 +914,51 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       RCLCPP_INFO_STREAM(LOGGER, "Follower arm grasp orientation: " << target_orientation.coeffs().transpose());
 
       // Call the correct `plan()` method
-      auto result_1 = pair.second->plan(start, *eef_link, offset, target_pose, follow_jmg_,
-                                      props.get<double>("timeout"), traj_1, path_constraints);
+      auto result_cartesian = pair.second->plan(start, *eef_link, offset, target_pose, follow_jmg_,
+                                      props.get<double>("timeout"), traj_cartesian, path_constraints);
 
-      if (!result_1) {
-        RCLCPP_ERROR(LOGGER, "Follower arm planning to intermediate pose failed.");
+      if (!result_cartesian) {
+        RCLCPP_ERROR(LOGGER, "Follower arm planning to intermediate pose with cartesian planner failed.");
         return false;
       }
-
     }
   }
+  
+  if (!attach_object){
+    traj_1 = traj_cartesian;
+  }else{
+    planning_scene::PlanningScenePtr start_with_cable = start->diff();
+    std::string object_id = "grasped_cable";
+    // cable should be initially aligned with the vector pointing from the leader hand to the follower hand
+    attachCollisionCable(start_with_cable, object_id,  track_offset, 0.01,  cable_vector_in_wolrd, "left_panda_hand", 
+                        {"left_panda_hand", "left_panda_leftfinger", "left_panda_rightfinger", "right_panda_hand", "right_panda_leftfinger", "right_panda_rightfinger"});
 
+    // cartesian planner is only to obtain grasp_scene
+    planning_scene::PlanningScenePtr grasp_with_cable = start_with_cable->diff();
+    moveit::core::RobotState& grasp_state = grasp_with_cable->getCurrentStateNonConst();
+    const moveit::core::RobotState& traj1_final_state = traj_cartesian->getLastWayPoint();
+    std::vector<double> intermediate_positions;
+    traj1_final_state.copyJointGroupPositions(follow_jmg_, intermediate_positions);
+    grasp_state.setJointGroupPositions(follow_jmg_, intermediate_positions);
+    grasp_state.update();
+                        
+    // pipeline planner plans to the grasp scene
+    for (const auto& pair: planner_) {
+      if (pair.first == props.get<std::string>("follow_group")) {
+        follow_jmg_ = final_state.getJointModelGroup(pair.first);
+        // Plan trajectory
+        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, props.get<double>("timeout"), traj_1, path_constraints);
+        if (!result_1) {
+          RCLCPP_ERROR(LOGGER, "Follower arm planning to grasp pose failed.");
+          return false;
+        }
+      }
+    }
+
+    // Detach the cable from the leader arm
+    detachCollisionCable(intermediate_scene, object_id);
+  }
+  
   if (!traj_1->empty()) {
     intermediate_scene = start->diff();
     moveit::core::RobotState& intermediate_state = intermediate_scene->getCurrentStateNonConst();
@@ -913,11 +979,9 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
     RCLCPP_WARN(LOGGER, "Cartesian trajectory is empty.");
   }
   
-  // Plan joint trajectory for the follower arm
+  // ---- Step 2: Plan from grasping to start ----
   for (const auto& pair : planner_) {
     if (pair.first == props.get<std::string>("follow_group")) {
-
-      // ---- Step 3: Plan from intermediate to final ----
       final_scene = start->diff();
       // update only leader_jmg_
       moveit::core::RobotState& goal_state = final_scene->getCurrentStateNonConst();
@@ -1377,53 +1441,84 @@ moveit_msgs::msg::Constraints ConnectMFReverse::setBoxConstraint(planning_scene:
 
 // }
 
-// void ConnectMFReverse::removeCollisionObject(const std::string& id)
-// {
-// }
 
 // void ConnectMFReverse::allowCollisions()
 // {
 
 // }
 
-// void ConnectMFReverse::attachCollisionCable(planning_scene::PlanningSceneConstPtr scene,
-//                                              const std::string& id, 
-//                                              double length,
-//                                              double radius,
-//                                              const std::string& attach_link, 
-//                                              std::vector<std::string> touch_links)
-// {
-//     moveit_msgs::msg::AttachedCollisionObject attach_msg;
-//     attach_msg.link_name = attach_link;
-//     attach_msg.object.header.frame_id = attach_link;
-//     attach_msg.object.id = "grasped_cable";
+void ConnectMFReverse::attachCollisionCable(planning_scene::PlanningScenePtr scene,
+                                             const std::string& id, 
+                                             double length,
+                                             double radius,
+                                             Eigen::Vector3d vec_in_world,
+                                             const std::string& attach_link, 
+                                             std::vector<std::string> touch_links)
+{
+    moveit_msgs::msg::AttachedCollisionObject attach_msg;
+    attach_msg.link_name = attach_link;
+    attach_msg.object.header.frame_id = attach_link;
+    attach_msg.object.id = id;
 
-//     // Add geometry
-//     shape_msgs::msg::SolidPrimitive prim;
-//     prim.type = prim.CYLINDER;
-//     prim.dimensions = {length, radius}; // height (along local Z), radius
+    // Add geometry of cable
+    shape_msgs::msg::SolidPrimitive prim;
+    prim.type = prim.CYLINDER;
+    prim.dimensions = {length, radius}; // height (along local Z), radius
 
-//     // Step 1: Create pose in TCP frame (cylinder lying along +X, end at origin)
-//     Eigen::Isometry3d cylinder_pose_tcp = Eigen::Isometry3d::Identity();
-//     // Rotate cylinder Z-axis → X-axis using +90° about Y
-//     cylinder_pose_tcp.linear() = Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitY()).toRotationMatrix();
-//     // Translate it so one end sits at TCP
-//     cylinder_pose_tcp.translation().x() = 0.5*length;
-//     // Step 2: Transform to `left_panda_hand` frame
-//     Eigen::Isometry3d cylinder_pose_in_hand = hand_to_tcp_transform_ * cylinder_pose_tcp;
-//     // Step 3: Convert to geometry_msgs::Pose
-//     geometry_msgs::msg::Pose pose_msg = tf2::toMsg(cylinder_pose_in_hand);
+    // Step 1: Create pose in TCP frame (cylinder lying along +X, end at origin)
+    Eigen::Isometry3d cylinder_pose_tcp = Eigen::Isometry3d::Identity();
+    // Convert direction from world frame into attach_link tcp frame
+    Eigen::Isometry3d world_to_hand = scene->getFrameTransform(attach_link).inverse();
+    Eigen::Vector3d vec_in_hand = world_to_hand.linear() * vec_in_world.normalized();
+    // Calculate the rotation of cylinder Z-axis to align with the direction
+    Eigen::Quaterniond align_quat = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), vec_in_hand);
+    cylinder_pose_tcp.linear() = align_quat.toRotationMatrix();
+    // Rotate cylinder Z-axis → X-axis using +90° about Y
+    // cylinder_pose_tcp.linear() = Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitY()).toRotationMatrix();
+    // Translate it so one end sits at TCP
+    cylinder_pose_tcp.translation() =  vec_in_hand.normalized() * (0.5*length);
+    // Step 2: Transform to `left_panda_hand` frame
+    Eigen::Isometry3d cylinder_pose_in_hand = hand_to_tcp_transform_ * cylinder_pose_tcp;
+    // Step 3: Convert to geometry_msgs::Pose
+    geometry_msgs::msg::Pose pose_msg = tf2::toMsg(cylinder_pose_in_hand);
 
-//     attach_msg.object.primitives.push_back(prim);
-//     attach_msg.object.primitive_poses.push_back(pose_msg);
-//     attach_msg.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+    RCLCPP_INFO_STREAM(LOGGER, "Attach collision object: " << id 
+                               << " position: " << pose_msg.position.x << ", " << pose_msg.position.y << ", " << pose_msg.position.z 
+                               << " orientation: " << pose_msg.orientation.x << ", " << pose_msg.orientation.y << ", " << pose_msg.orientation.z << ", " << pose_msg.orientation.w);
 
-//     // Ignore collision with the gripper
-//     attach_msg.touch_links = touch_links;
+    attach_msg.object.primitives.push_back(prim);
+    attach_msg.object.primitive_poses.push_back(pose_msg);
+    attach_msg.object.operation = moveit_msgs::msg::CollisionObject::ADD;
 
-//     scene->processAttachedCollisionObjectMsg(attach_msg);
+    // Ignore collision with both grippers
+    attach_msg.touch_links = touch_links;
 
-// }
+    scene->processAttachedCollisionObjectMsg(attach_msg);
+
+    // visualization
+    Eigen::Isometry3d pose_in_world = scene->getFrameTransform(attach_link) * cylinder_pose_in_hand;
+    // Convert the pose to a geometry_msgs::Pose for visualization
+    geometry_msgs::msg::Pose pose_msg_world = tf2::toMsg(pose_in_world);
+    visual_tools_.publishCylinder(pose_msg_world, rviz_visual_tools::ORANGE, length, radius);
+    visual_tools_.trigger();
+
+}
+
+void ConnectMFReverse::detachCollisionCable(planning_scene::PlanningScenePtr scene,
+                                            const std::string& id)
+{
+    // Step 1: Detach from robot
+    moveit_msgs::msg::AttachedCollisionObject detach_attached;
+    detach_attached.object.id = id;
+    detach_attached.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    scene->processAttachedCollisionObjectMsg(detach_attached);
+
+    // Step 2: Remove from world (scene)
+    moveit_msgs::msg::CollisionObject remove_from_world;
+    remove_from_world.id = id;
+    remove_from_world.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    scene->processCollisionObjectMsg(remove_from_world);
+}
 
 }  // namespace connect_master_follower
 }  // namespace task_constructor
