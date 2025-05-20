@@ -40,6 +40,7 @@
 
 #include <moveit/task_constructor/solvers/planner_interface.h>
 #include <moveit_msgs/msg/motion_plan_request.hpp>
+#include <moveit_msgs/msg/generic_trajectory.hpp>
 #include <rclcpp/node.hpp>
 #include <moveit/macros/class_forward.h>
 
@@ -90,6 +91,11 @@ public:
 	Result plan(const planning_scene::PlanningSceneConstPtr& from, const planning_scene::PlanningSceneConstPtr& to,
 	            const core::JointModelGroup* jmg, double timeout, robot_trajectory::RobotTrajectoryPtr& result,
 	            const moveit_msgs::msg::Constraints& path_constraints = moveit_msgs::msg::Constraints()) override;
+
+	Result plan(const planning_scene::PlanningSceneConstPtr& from, const planning_scene::PlanningSceneConstPtr& to,
+				const moveit::core::JointModelGroup* jmg, double timeout, robot_trajectory::RobotTrajectoryPtr& result,
+				const moveit_msgs::msg::GenericTrajectory& initial_trajectory,
+				const moveit_msgs::msg::Constraints& path_constraints = moveit_msgs::msg::Constraints());
 
 	Result plan(const planning_scene::PlanningSceneConstPtr& from, const moveit::core::LinkModel& link,
 	            const Eigen::Isometry3d& offset, const Eigen::Isometry3d& target,

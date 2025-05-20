@@ -183,6 +183,28 @@ PlannerInterface::Result PipelinePlanner::plan(const planning_scene::PlanningSce
 }
 
 PlannerInterface::Result PipelinePlanner::plan(const planning_scene::PlanningSceneConstPtr& from,
+											const planning_scene::PlanningSceneConstPtr& to,
+											const moveit::core::JointModelGroup* jmg, double timeout,
+											robot_trajectory::RobotTrajectoryPtr& result,
+											const moveit_msgs::msg::GenericTrajectory& initial_trajectory,
+											const moveit_msgs::msg::Constraints& path_constraints) {
+	const auto& props = properties();
+	moveit_msgs::msg::MotionPlanRequest req;
+	initMotionPlanRequest(req, props, jmg, timeout);
+
+	req.goal_constraints.resize(1);
+	req.goal_constraints[0] = kinematic_constraints::constructGoalConstraints(to->getCurrentState(), jmg,
+									props.get<double>("goal_joint_tolerance"));
+	
+	req.reference_trajectories.resize(1);
+	req.reference_trajectories[0] = initial_trajectory;
+	
+	req.path_constraints = path_constraints;
+
+	return plan(from, req, result);
+}
+
+PlannerInterface::Result PipelinePlanner::plan(const planning_scene::PlanningSceneConstPtr& from,
                                                const moveit::core::LinkModel& link, const Eigen::Isometry3d& offset,
                                                const Eigen::Isometry3d& target_eigen,
                                                const moveit::core::JointModelGroup* jmg, double timeout,
@@ -213,6 +235,7 @@ PlannerInterface::Result PipelinePlanner::plan(const planning_scene::PlanningSce
 	result = res.trajectory_;
 	return { success, success ? std::string() : moveit::core::error_code_to_string(res.error_code_.val) };
 }
+
 }  // namespace solvers
 }  // namespace task_constructor
 }  // namespace moveit
