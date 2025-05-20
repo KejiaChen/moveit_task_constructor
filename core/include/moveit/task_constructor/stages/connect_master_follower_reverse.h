@@ -44,6 +44,7 @@
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
 #include <moveit/task_constructor/solvers/cartesian_path.h>
+#include <moveit/task_constructor/solvers/pipeline_planner.h>
 
 namespace moveit {
 namespace core {
@@ -53,6 +54,7 @@ MOVEIT_CLASS_FORWARD(RobotState);
 
 namespace moveit {
 namespace task_constructor {
+
 namespace stages {
 
 /** Connect arbitrary InterfaceStates by motion planning
@@ -71,18 +73,21 @@ class ConnectMFReverse : public Connect
 
 public:
   using GroupCartPlannerVector = std::vector<std::pair<std::string, solvers::CartesianPathPtr>>;
-
+  using GroupPipePlannerVector = std::vector<std::pair<std::string, solvers::PipelinePlannerPtr>>;
 protected:
   GroupPlannerVector interpolation_planner_;
   GroupCartPlannerVector cartesian_planner_;
+  GroupPipePlannerVector chomp_planner_;
 
 public:
   ConnectMFReverse(const std::string& name, const GroupPlannerVector& planners, 
             const GroupPlannerVector& interpolation_planners,
             const GroupCartPlannerVector& cartesian_planners,
+            const GroupPipePlannerVector& chomp_planners,
             const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow,
             moveit_visual_tools::MoveItVisualTools visual_tools);
   void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }
+  void init(const moveit::core::RobotModelConstPtr& robot_model) override;
 
 protected:
   void compute(const InterfaceState& from, const InterfaceState& to) override;
@@ -158,8 +163,10 @@ private:
   moveit_msgs::msg::Constraints setBoxConstraint(planning_scene::PlanningSceneConstPtr start,
                                                     planning_scene::PlanningSceneConstPtr end,
                                                     std::string constraint_link_name);
+  
+  // moveit_msgs::msg::Constraints createTrajectoryConstraintsFromTrajectory(const moveit_msgs::msg::RobotTrajectory& robot_traj_msg);
 
- void attachCollisionCable(planning_scene::PlanningScenePtr scene,
+  void attachCollisionCable(planning_scene::PlanningScenePtr scene,
                             const std::string& id, 
                             double length,
                             double radius,

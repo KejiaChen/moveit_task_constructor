@@ -59,6 +59,7 @@ static const rclcpp::Logger LOGGER = rclcpp::get_logger("ConnectMFReverse");
 ConnectMFReverse::ConnectMFReverse(const std::string& name, const GroupPlannerVector& planners,
                     const GroupPlannerVector& interpolation_planners,
                     const GroupCartPlannerVector& cartesian_planners,
+                    const GroupPipePlannerVector& chomp_planners,
                     const moveit::planning_interface::MoveGroupInterfacePtr& move_group_lead,
                     moveit_visual_tools::MoveItVisualTools visual_tools) 
     :Connect(name, planners), 
@@ -66,6 +67,7 @@ ConnectMFReverse::ConnectMFReverse(const std::string& name, const GroupPlannerVe
      visual_tools_(visual_tools),
      interpolation_planner_(interpolation_planners), 
      cartesian_planner_(cartesian_planners),
+     chomp_planner_(chomp_planners),
      hand_to_tcp_transform_(Eigen::Isometry3d::Identity()),  // panda hand to TCP transform
      lead_flange_to_tcp_transform_(Eigen::Isometry3d::Identity()), // panda link8 to TCP transform
      follow_flange_to_tcp_transform_(Eigen::Isometry3d::Identity())
@@ -105,6 +107,29 @@ ConnectMFReverse::ConnectMFReverse(const std::string& name, const GroupPlannerVe
     p.declare<Eigen::Isometry3d>("hand_to_tcp_transform", default_hand_to_tcp_transform, "transform from hand to TCP");
     p.declare<Eigen::Isometry3d>("lead_flange_to_tcp_transform", default_flange_to_tcp_transform, "transform from lead flange (panda_link8) to TCP");
     p.declare<Eigen::Isometry3d>("follow_flange_to_tcp_transform", default_flange_to_tcp_transform, "transform from follow flange (panda_link8) to TCP");
+}
+
+void ConnectMFReverse::init(const core::RobotModelConstPtr& robot_model) {
+  Connect::init(robot_model);
+  // init planners
+  for (const GroupPlannerVector::value_type& pair : interpolation_planner_) {
+    if (!pair.second)
+      throw InitStageException(*this, "invalid planner for group: " + pair.first);
+    else
+      pair.second->init(robot_model);
+  }
+  for (const GroupCartPlannerVector::value_type& pair : cartesian_planner_) {
+    if (!pair.second)
+      throw InitStageException(*this, "invalid planner for group: " + pair.first);
+    else
+      pair.second->init(robot_model);
+  }
+  for (const GroupPlannerVector::value_type& pair : chomp_planner_) {
+    if (!pair.second)
+      throw InitStageException(*this, "invalid planner for group: " + pair.first);
+    else
+      pair.second->init(robot_model);
+  }
 }
 
 void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState& to) {
@@ -942,12 +967,34 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
     grasp_state.setJointGroupPositions(follow_jmg_, intermediate_positions);
     grasp_state.update();
                         
-    // pipeline planner plans to the grasp scene
+    // ompl planner plans to the grasp scene
+    robot_trajectory::RobotTrajectoryPtr traj_ompl;
     for (const auto& pair: planner_) {
       if (pair.first == props.get<std::string>("follow_group")) {
         follow_jmg_ = final_state.getJointModelGroup(pair.first);
         // Plan trajectory
-        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, props.get<double>("timeout"), traj_1, path_constraints);
+        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, props.get<double>("timeout"), traj_ompl, path_constraints);
+        if (!result_1) {
+          RCLCPP_ERROR(LOGGER, "Follower arm planning to grasp pose failed.");
+          return false;
+        }
+      }
+    }
+
+    // chomp planner plans to the grasp scene
+    for (const auto& pair: chomp_planner_) {
+      if (pair.first == props.get<std::string>("follow_group")) {
+        follow_jmg_ = final_state.getJointModelGroup(pair.first);
+        // initialize the trajectory
+        
+        moveit_msgs::msg::RobotTrajectory robot_ref_traj_msg;
+        traj_ompl->getRobotTrajectoryMsg(robot_ref_traj_msg);
+        moveit_msgs::msg::GenericTrajectory generic_ref_traj_msg;
+        generic_ref_traj_msg.joint_trajectory.resize(1);
+        generic_ref_traj_msg.joint_trajectory[0] = robot_ref_traj_msg.joint_trajectory;
+        RCLCPP_INFO_STREAM(LOGGER, "Set cartesian trajectory as initial trajectory.");
+        // Plan trajectory
+        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, props.get<double>("timeout"), traj_1, generic_ref_traj_msg, path_constraints);
         if (!result_1) {
           RCLCPP_ERROR(LOGGER, "Follower arm planning to grasp pose failed.");
           return false;
@@ -1310,7 +1357,7 @@ scene->checkCollision(req, res, robot_state, acm);
 return res.collision;
 }
 
-
+/*utils functions*/
 Eigen::Quaterniond ConnectMFReverse::combineRotations(Eigen::Quaterniond grasp_orientation, 
                                                       Eigen::Quaterniond clip_orientation)
 {
@@ -1434,17 +1481,28 @@ moveit_msgs::msg::Constraints ConnectMFReverse::setBoxConstraint(planning_scene:
   return box_constraints;
 }
 
-// Modified from ModifyPlanningScene stage
-// void ConnectMFReverse::addCollisionObject(const std::string& id, const Eigen::Isometry3d& pose,
-//                                             const moveit_msgs::msg::CollisionObject& collision_object)
+// moveit_msgs::msg::TrajectoryConstraints ConnectMFReverse::createTrajectoryConstraintsFromTrajectory(const moveit_msgs::msg::RobotTrajectory& robot_traj_msg)
 // {
+//   moveit_msgs::msg::TrajectoryConstraints trajectory_constraints;
+//   trajectory_constraints.constraints.reserve(robot_traj_msg.joint_trajectory.points.size());
 
-// }
+//   for (const auto& point : robot_traj_msg.joint_trajectory.points) {
+//     moveit_msgs::msg::Constraints waypoint_constraints;
 
+//     for (size_t i = 0; i < robot_traj_msg.joint_trajectory.joint_names.size(); ++i) {
+//       moveit_msgs::msg::JointConstraint jc;
+//       jc.joint_name = robot_traj_msg.joint_trajectory.joint_names[i];
+//       jc.position = point.positions[i];
+//       jc.tolerance_above = 1e-5;
+//       jc.tolerance_below = 1e-5;
+//       jc.weight = 1.0;
+//       waypoint_constraints.joint_constraints.push_back(jc);
+//     }
 
-// void ConnectMFReverse::allowCollisions()
-// {
+//     trajectory_constraints.constraints.push_back(waypoint_constraints);
+//   }
 
+//   return trajectory_constraints;
 // }
 
 void ConnectMFReverse::attachCollisionCable(planning_scene::PlanningScenePtr scene,
