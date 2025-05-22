@@ -143,6 +143,15 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
 
     RCLCPP_INFO_STREAM(LOGGER, "Computing dual-arm trajectory");
 
+    // Debug: remove clip6
+    // planning_scene::PlanningScenePtr temp_to_scene = to.scene()->diff();
+    // planning_scene::PlanningScenePtr temp_from_scene = from.scene()->diff();    
+    // moveit_msgs::msg::CollisionObject remove_from_world;
+    // remove_from_world.id = "clip5";
+    // remove_from_world.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    // temp_to_scene->processCollisionObjectMsg(remove_from_world);
+    // temp_from_scene->processCollisionObjectMsg(remove_from_world);
+
     std::vector<planning_scene::PlanningSceneConstPtr> intermediate_scenes;
     planning_scene::PlanningSceneConstPtr to_scene = to.scene();
     planning_scene::PlanningSceneConstPtr from_scene = from.scene();
@@ -156,9 +165,11 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
     // moveit::core::RobotState intermediate_state = intermediate_scene->getCurrentStateNonConst();
 
     // Step 1: Compute trajectory for the first arm
-    if (!computeSecondArmTrajectoryReverse(from, to, reversed_follower_trajectory, follower_intermediate_scene, follower_final_scene, true)) {
+    std::string first_arm_plan_msg = "";
+    if (!computeSecondArmTrajectoryReverse(from, to, reversed_follower_trajectory, follower_intermediate_scene, follower_final_scene, 
+                                          first_arm_plan_msg, true)) {
         auto failed_solution = std::make_shared<SubTrajectory>();
-        failed_solution->markAsFailure("Follower arm trajectory planning failed.");
+        failed_solution->markAsFailure("Follower arm trajectory planning failed." + first_arm_plan_msg);
         connect(from, to, failed_solution);
         return;
     }
@@ -831,6 +842,7 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
                                                         robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                                         planning_scene::PlanningScenePtr& intermediate_scene,
                                                         planning_scene::PlanningScenePtr& final_scene,
+                                                        std::string& return_message,
                                                         bool attach_object) 
 {
   const auto& props = properties();
@@ -882,22 +894,16 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
 
   Eigen::Isometry3d leader_hand_transform = start_state.getGlobalLinkTransform("right_panda_hand") * hand_to_tcp_transform_;
   Eigen::Isometry3d follower_hand_transform = start_state.getGlobalLinkTransform("left_panda_hand") * hand_to_tcp_transform_;
-  Eigen::Vector3d cable_vector_in_wolrd = (leader_hand_transform.translation() - follower_hand_transform.translation()).normalized();
-
-//   const auto& acm = start->getAllowedCollisionMatrix();
-//   std::string finger_link = "left_panda_leftfinger";
-//   collision_detection::AllowedCollision::Type allowed;
-//     if (acm.getEntry(object_id, finger_link, allowed)) {
-//         RCLCPP_INFO_STREAM(LOGGER, "ACM entry (grasped_cable vs left_panda_leftfinger): "
-//                         << (allowed == collision_detection::AllowedCollision::ALWAYS ? "ALLOWED" : "NOT ALLOWED"));
-//     } else {
-//         RCLCPP_WARN_STREAM(LOGGER, "No ACM entry found for grasped_cable vs left_panda_leftfinger.");
-//     }
-                      
+  Eigen::Vector3d cable_vector_in_wolrd = (leader_hand_transform.translation() - follower_hand_transform.translation()).normalized();  
 
   // ---- Step 1: Plan from goal to grasping ----
+  const moveit::core::LinkModel* eef_link = start_state.getLinkModel("left_panda_hand");
+  // Offset from current link frame to ik_frame (used by solver)
+  Eigen::Isometry3d offset = Eigen::Isometry3d::Identity(); // offset is identity
+
   robot_trajectory::RobotTrajectoryPtr traj_1;
   robot_trajectory::RobotTrajectoryPtr traj_cartesian;
+  Eigen::Isometry3d target_pose;
   for (const auto& pair: cartesian_planner_) {
   // for (const auto& pair: planner_) {
     if (pair.first == props.get<std::string>("follow_group")) {
@@ -905,16 +911,12 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       follow_jmg_ = final_state.getJointModelGroup(pair.first);
 
       const moveit::core::RobotState& start_state = start->getCurrentState();
-      const moveit::core::LinkModel* eef_link = start_state.getLinkModel("left_panda_hand");
 
       // Get current pose of EEF in world frame
       Eigen::Isometry3d current_pose = start_state.getGlobalLinkTransform(eef_link);
       Eigen::Quaterniond clip_orientation(current_pose.rotation());
       RCLCPP_INFO_STREAM(LOGGER, "Follower arm current position: " << current_pose.translation().transpose());
       RCLCPP_INFO_STREAM(LOGGER, "Follower arm current orientation: " << clip_orientation.coeffs().transpose());
-
-      // Offset from current link frame to ik_frame (used by solver)
-      Eigen::Isometry3d offset = current_pose.inverse() * current_pose;  // Identity in this case, because ik_pose_world = current
 
       // Option 1: Get the follower_grasp_pose in world frame as target
       geometry_msgs::msg::PoseStamped follower_grasp_pos_msg = props.get<geometry_msgs::msg::PoseStamped>("follow_grasp_pose");
@@ -924,9 +926,9 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       
       Eigen::Quaterniond combined_orientation = combineRotations(grasp_orientation, clip_orientation);
       follower_grasp_pose_tcp.linear() = combined_orientation.toRotationMatrix();
-      Eigen::Isometry3d follower_grasp_pose_eef = follower_grasp_pose_tcp * (hand_to_tcp_transform_).inverse();
+      Eigen::Isometry3d follower_grasp_pose_eef = follower_grasp_pose_tcp * (hand_to_tcp_transform_.inverse());
 
-      Eigen::Isometry3d target_pose = follower_grasp_pose_eef;
+      target_pose = follower_grasp_pose_eef;
       Eigen::Quaterniond target_orientation(target_pose.rotation());
       
       // // Option 2: Get the follower_grasp_pose in EEF frame as target
@@ -938,19 +940,22 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       RCLCPP_INFO_STREAM(LOGGER, "Follower arm grasp position: " << target_pose.translation().transpose());
       RCLCPP_INFO_STREAM(LOGGER, "Follower arm grasp orientation: " << target_orientation.coeffs().transpose());
 
-      // Call the correct `plan()` method
-      auto result_cartesian = pair.second->plan(start, *eef_link, offset, target_pose, follow_jmg_,
-                                      props.get<double>("timeout"), traj_cartesian, path_constraints);
+      // // Call the correct `plan()` method
+      // auto result_cartesian = pair.second->plan(start, *eef_link, offset, target_pose, follow_jmg_,
+      //                                 props.get<double>("timeout"), traj_cartesian, path_constraints);
 
-      if (!result_cartesian) {
-        RCLCPP_ERROR(LOGGER, "Follower arm planning to intermediate pose with cartesian planner failed.");
-        return false;
-      }
+      // if (!result_cartesian) {
+      //   return_message = "Follower arm planning to grasp pose with cartesian planner failed.";
+      //   RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
+      //   return false;
+      // }
+      
     }
   }
   
   if (!attach_object){
     traj_1 = traj_cartesian;
+    RCLCPP_INFO_STREAM(LOGGER, "Cable collision not considered.");
   }else{
     planning_scene::PlanningScenePtr start_with_cable = start->diff();
     std::string object_id = "grasped_cable";
@@ -961,25 +966,58 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
     // cartesian planner is only to obtain grasp_scene
     planning_scene::PlanningScenePtr grasp_with_cable = start_with_cable->diff();
     moveit::core::RobotState& grasp_state = grasp_with_cable->getCurrentStateNonConst();
-    const moveit::core::RobotState& traj1_final_state = traj_cartesian->getLastWayPoint();
+
+    // Option 1: Get the joint target from the cartesian trajectory
+    // const moveit::core::RobotState& traj1_final_state = traj_cartesian->getLastWayPoint();
+    // std::vector<double> intermediate_positions;
+    // traj1_final_state.copyJointGroupPositions(follow_jmg_, intermediate_positions);
+    // grasp_state.setJointGroupPositions(follow_jmg_, intermediate_positions);
+    // grasp_state.update();
+
+    // Option 2: Get the joint target from IK
+    // Define your seed (bias) joint configuration
+    // std::vector<double> seed = {0.0, -0.8, 0.0, -2.2, 0.0, 1.5, 0.5};
+    // state.setJointGroupPositions(follow_jmg_, seed);
+    bool success = grasp_state.setFromIK(follow_jmg_, target_pose, "left_panda_hand", props.get<double>("timeout"));
+    if (!success) {
+      return_message = "Follower arm grasp pose set from IK failed.";
+      RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
+      return false;
+    }
     std::vector<double> intermediate_positions;
-    traj1_final_state.copyJointGroupPositions(follow_jmg_, intermediate_positions);
-    grasp_state.setJointGroupPositions(follow_jmg_, intermediate_positions);
+    grasp_state.copyJointGroupPositions(follow_jmg_, intermediate_positions);
+    RCLCPP_INFO_STREAM(LOGGER, "Follower arm grasp joint position: " << intermediate_positions[0] << " " << intermediate_positions[1] << " " << intermediate_positions[2] << " "
+                                            << intermediate_positions[3] << " " << intermediate_positions[4] << " " << intermediate_positions[5] << " "
+                                            << intermediate_positions[6]);
     grasp_state.update();
                         
     // ompl planner plans to the grasp scene
-    robot_trajectory::RobotTrajectoryPtr traj_ompl;
+    robot_trajectory::RobotTrajectoryPtr traj_ompl_1;
     for (const auto& pair: planner_) {
       if (pair.first == props.get<std::string>("follow_group")) {
         follow_jmg_ = final_state.getJointModelGroup(pair.first);
         // Plan trajectory
-        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, props.get<double>("timeout"), traj_ompl, path_constraints);
+        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, 
+                                        props.get<double>("timeout"), traj_ompl_1);
+        // auto result_1 = pair.second->plan(start_with_cable, *eef_link, offset, target_pose, follow_jmg_,
+        //                                 props.get<double>("timeout"), traj_ompl_1);
         if (!result_1) {
-          RCLCPP_ERROR(LOGGER, "Follower arm planning to grasp pose failed.");
+          return_message = "Follower arm planning to grasp pose with ompl failed.";
+          RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
           return false;
         }
       }
     }
+
+    // traj_1 = traj_ompl_1;
+
+    // planning_scene::PlanningScenePtr grasp_with_cable = start_with_cable->diff();
+    // moveit::core::RobotState& grasp_state = grasp_with_cable->getCurrentStateNonConst();
+    // const moveit::core::RobotState& traj1_final_state = traj_ompl_1->getLastWayPoint();
+    // std::vector<double> intermediate_positions;
+    // traj1_final_state.copyJointGroupPositions(follow_jmg_, intermediate_positions);
+    // grasp_state.setJointGroupPositions(follow_jmg_, intermediate_positions);
+    // grasp_state.update();
 
     // chomp planner plans to the grasp scene
     for (const auto& pair: chomp_planner_) {
@@ -988,22 +1026,23 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
         // initialize the trajectory
         
         moveit_msgs::msg::RobotTrajectory robot_ref_traj_msg;
-        traj_ompl->getRobotTrajectoryMsg(robot_ref_traj_msg);
+        traj_ompl_1->getRobotTrajectoryMsg(robot_ref_traj_msg);
         moveit_msgs::msg::GenericTrajectory generic_ref_traj_msg;
         generic_ref_traj_msg.joint_trajectory.resize(1);
         generic_ref_traj_msg.joint_trajectory[0] = robot_ref_traj_msg.joint_trajectory;
         RCLCPP_INFO_STREAM(LOGGER, "Set cartesian trajectory as initial trajectory.");
         // Plan trajectory
-        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, props.get<double>("timeout"), traj_1, generic_ref_traj_msg, path_constraints);
+        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, props.get<double>("timeout"), traj_1, generic_ref_traj_msg);
         if (!result_1) {
-          RCLCPP_ERROR(LOGGER, "Follower arm planning to grasp pose failed.");
+          return_message = "Follower arm planning to grasp pose with chomp failed.";
+          RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
           return false;
         }
       }
     }
 
     // Detach the cable from the leader arm
-    detachCollisionCable(intermediate_scene, object_id);
+    detachCollisionCable(start_with_cable, object_id);
   }
   
   if (!traj_1->empty()) {
@@ -1027,6 +1066,8 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
   }
   
   // ---- Step 2: Plan from grasping to start ----
+  robot_trajectory::RobotTrajectoryPtr traj_2;
+  robot_trajectory::RobotTrajectoryPtr traj_ompl_2(new robot_trajectory::RobotTrajectory(start->getRobotModel(), follow_jmg_));
   for (const auto& pair : planner_) {
     if (pair.first == props.get<std::string>("follow_group")) {
       final_scene = start->diff();
@@ -1038,21 +1079,44 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       goal_state.update();
 
       // Plan trajectory
-      robot_trajectory::RobotTrajectoryPtr traj_2(new robot_trajectory::RobotTrajectory(start->getRobotModel(), follow_jmg_));
+      
       auto result_2 = pair.second->plan(intermediate_scene, final_scene, follow_jmg_, props.get<double>("timeout"),
-                                      traj_2, path_constraints);
+                                      traj_ompl_2);
       if (!result_2) {
-        RCLCPP_ERROR(LOGGER, "follower arm planning from intermediate to final failed.");
+        return_message = "Follower arm planning from grasp pose to final with ompl failed.";
+        RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
         return false;
       }
-      
-      // ---- Step 4: Concatenate and assign ----
-      follower_trajectory->append(*traj_2, 0.0);
-
-      return true;
     }
   }
-  return false;
+
+  for (const auto& pair: chomp_planner_) {
+    if (pair.first == props.get<std::string>("follow_group")) {
+      follow_jmg_ = final_state.getJointModelGroup(pair.first);
+      // initialize the trajectory
+      moveit_msgs::msg::RobotTrajectory robot_ref_traj_msg;
+      traj_ompl_2->getRobotTrajectoryMsg(robot_ref_traj_msg);
+      moveit_msgs::msg::GenericTrajectory generic_ref_traj_msg;
+      generic_ref_traj_msg.joint_trajectory.resize(1);
+      generic_ref_traj_msg.joint_trajectory[0] = robot_ref_traj_msg.joint_trajectory;
+      RCLCPP_INFO_STREAM(LOGGER, "Set cartesian trajectory as initial trajectory.");
+      // Plan trajectory
+      auto result_2 = pair.second->plan(intermediate_scene, final_scene, follow_jmg_, props.get<double>("timeout"), traj_2, generic_ref_traj_msg);
+      if (!result_2) {
+        return_message = "Follower arm planning from grasp pose to final with chomp failed.";
+        RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
+        return false;
+      }
+    }
+  }
+
+  // ---- Step 4: Concatenate and assign ----
+  follower_trajectory->append(*traj_2, 0.0);
+
+  return_message = "Follower arm planning from start to final succeeded.";
+  return true;
+
+  // return false;
 }
 
 double ConnectMFReverse::FirstArmFollow(planning_scene::PlanningScenePtr& intermediate_scene,

@@ -97,6 +97,7 @@ private:
                                         robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                         planning_scene::PlanningScenePtr& intermediate_scene,
                                         planning_scene::PlanningScenePtr& final_scene,
+                                        std::string& return_message,
                                         bool attach_object=false); 
 
   bool computeFirstArmTrajectoryReverse(robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
