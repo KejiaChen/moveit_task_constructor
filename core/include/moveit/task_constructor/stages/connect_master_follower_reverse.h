@@ -78,12 +78,14 @@ protected:
   GroupPlannerVector interpolation_planner_;
   GroupCartPlannerVector cartesian_planner_;
   GroupPipePlannerVector chomp_planner_;
+  // GroupPlannerVector hand_planner_;
 
 public:
   ConnectMFReverse(const std::string& name, const GroupPlannerVector& planners, 
             const GroupPlannerVector& interpolation_planners,
             const GroupCartPlannerVector& cartesian_planners,
             const GroupPipePlannerVector& chomp_planners,
+            const GroupPlannerVector& hand_planners,
             const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow,
             moveit_visual_tools::MoveItVisualTools visual_tools);
   void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }
@@ -101,6 +103,7 @@ private:
                                         bool attach_object=false); 
 
   bool computeFirstArmTrajectoryReverse(robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
+                                        robot_trajectory::RobotTrajectoryPtr& follower_hand_trajectory,
                                         std::vector<PlannerIdTrajectoryPair>& follower_trajectories,
                                         planning_scene::PlanningSceneConstPtr& to_scene,
                                         robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
@@ -179,7 +182,9 @@ private:
                              const std::string& id);
   
   const moveit::core::JointModelGroup* follow_jmg_;
+  const moveit::core::JointModelGroup* follow_hand_jmg_;
   const moveit::core::JointModelGroup* leader_jmg_;
+  const moveit::core::JointModelGroup* leader_hand_jmg_;
   moveit::planning_interface::MoveGroupInterfacePtr move_group_lead_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
 
@@ -189,6 +194,7 @@ private:
 
   int follower_start_index_ = -1;
   int reversed_follower_start_index_ = -1;
+  int follower_grasp_index_ = -1;
 };
 }  // namespace stages
 }  // namespace task_constructor
