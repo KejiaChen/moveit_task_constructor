@@ -165,13 +165,26 @@ public:
 	double operator()(const SubTrajectory& s, std::string& comment) const override;
 };
 
-/** length of Cartesian trajection of a link */
+/** length of Cartesian trajection of ONE link */
 class LinkMotion : public TrajectoryCostTerm
 {
 public:
 	LinkMotion(std::string link_name);
 
 	std::string link_name;
+
+	using TrajectoryCostTerm::operator();
+	double operator()(const SubTrajectory& s, std::string& comment) const override;
+};
+
+/** Sum of length of Cartesian trajection of some links */
+class LinkMotionSum : public TrajectoryCostTerm
+{
+public:
+	LinkMotionSum(std::vector<std::string> links, std::vector<Eigen::Isometry3d> offsets);
+
+	std::vector<std::string> link_names;
+	std::vector<Eigen::Isometry3d> offsets;  //< offsets to apply to each link's position
 
 	using TrajectoryCostTerm::operator();
 	double operator()(const SubTrajectory& s, std::string& comment) const override;

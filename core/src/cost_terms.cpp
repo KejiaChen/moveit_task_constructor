@@ -221,6 +221,46 @@ double LinkMotion::operator()(const SubTrajectory& s, std::string& comment) cons
 	return distance;
 }
 
+LinkMotionSum::LinkMotionSum(std::vector<std::string> links, std::vector<Eigen::Isometry3d> offsets) 
+	: link_names{ std::move(links) }, offsets{ std::move(offsets) }
+	{
+		// Fill missing offsets with identity if fewer than links
+		if (offsets.size() < link_names.size())
+			offsets.resize(link_names.size(), Eigen::Isometry3d::Identity());
+	}
+
+double LinkMotionSum::operator()(const SubTrajectory& s, std::string& comment) const {
+	const auto& traj = s.trajectory();
+
+	if (!traj || traj->getWayPointCount() == 0)
+		return 0.0;
+
+	double total_distance = 0.0;
+
+	for (size_t l = 0; l < link_names.size(); ++l) {
+		const std::string& link_name = link_names[l];
+		const Eigen::Isometry3d& offset = offsets[l];
+
+		if (!traj->getWayPoint(0).knowsFrameTransform(link_name)) {
+			comment += fmt::format("LinkMotionSum: frame '{}' unknown in trajectory\n", link_name);
+			total_distance += std::numeric_limits<double>::infinity();
+			continue;
+		}
+
+		Eigen::Vector3d prev =
+			(traj->getWayPoint(0).getFrameTransform(link_name) * offset).translation();
+
+		for (size_t i = 1; i < traj->getWayPointCount(); ++i) {
+			Eigen::Vector3d curr =
+				(traj->getWayPoint(i).getFrameTransform(link_name) * offset).translation();
+			total_distance += (curr - prev).norm();
+			prev = curr;
+		}
+	}
+
+	return total_distance*10;  // Scale the total distance to be aligned with the cost function's expected range
+}
+
 Clearance::Clearance(bool with_world, bool cumulative, std::string group_property, Mode mode)
   : with_world{ with_world }
   , cumulative{ cumulative }
