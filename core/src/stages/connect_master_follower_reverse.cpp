@@ -81,6 +81,10 @@ ConnectMFReverse::ConnectMFReverse(const std::string& name, const GroupPlannerVe
 	// p.declare<double>("max_distance", 1e-2, "maximally accepted distance between end and goal sate");
 	// p.declare<moveit_msgs::msg::Constraints>("path_constraints", moveit_msgs::msg::Constraints(),
 	//                                          "constraints for the first arm to maintain during trajectory");
+    // p.declare<moveit_msgs::msg::Constraints>("lead_path_constraints", moveit_msgs::msg::Constraints(),
+    //                                         "constraints for the leader arm to maintain during trajectory");
+    p.declare<moveit_msgs::msg::Constraints>("follow_path_constraints", moveit_msgs::msg::Constraints(),
+                                            "constraints for the follower arm to maintain during trajectory");
 	// properties().declare<TimeParameterizationPtr>("merge_time_parameterization",
 	//                                               std::make_shared<TimeOptimalTrajectoryGeneration>());
 
@@ -169,13 +173,13 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
     // moveit::core::RobotState intermediate_state = intermediate_scene->getCurrentStateNonConst();
 
     // Step 1: Compute trajectory for the first arm
-    std::string first_arm_plan_msg = "";
+    std::string second_arm_plan_msg = "";
     if (!computeSecondArmTrajectoryReverse(from, to, reversed_follower_trajectory, 
                                           follower_intermediate_scene, follower_final_scene,
-                                          first_arm_plan_msg, true)) 
+                                          second_arm_plan_msg, true)) 
     {
         auto failed_solution = std::make_shared<SubTrajectory>();
-        failed_solution->markAsFailure("Follower arm trajectory planning failed." + first_arm_plan_msg);
+        failed_solution->markAsFailure("Follower arm trajectory planning failed. " + second_arm_plan_msg);
         connect(from, to, failed_solution);
         return;
     }
@@ -193,11 +197,12 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
     std::vector<PlannerIdTrajectoryPair> reversed_follower_trajectories;
     // if (!computeSecondArmTrajectory(leader_trajectory, leader_trajectories ,to, follower_trajectory, follower_trajectories, leader_intermediate_scene, 
     //                               leader_final_scene, intermediate_scenes)) 
+    std::string first_arm_plan_msg = "";
     if (!computeFirstArmTrajectoryReverse(reversed_follower_trajectory, reversed_follower_hand_trajectory, reversed_follower_trajectories, from_scene, reversed_leader_trajectory, reversed_leader_trajectories, 
-                                          follower_intermediate_scene, follower_final_scene, intermediate_scenes)) 
+                                          follower_intermediate_scene, follower_final_scene, intermediate_scenes, first_arm_plan_msg)) 
     {
-        auto failed_solution = std::make_shared<SubTrajectory>();        
-        failed_solution->markAsFailure("Leader arm trajectory planning failed.");
+        auto failed_solution = std::make_shared<SubTrajectory>(reversed_follower_trajectory);        
+        failed_solution->markAsFailure("Leader arm trajectory planning failed. " + first_arm_plan_msg);
         connect(from, to, failed_solution);
         return;
     }
@@ -393,7 +398,8 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
                                                   // robot_trajectory::RobotTrajectoryPtr& dual_trajectory,
                                                   planning_scene::PlanningScenePtr& follow_intermediate_scene,
                                                   planning_scene::PlanningScenePtr& follow_final_scene,
-                                                  std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes) 
+                                                  std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
+                                                  std::string& return_message) 
 {
 
   const auto& props = properties();
@@ -538,16 +544,16 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
 //   visual_tools_.trigger();
 
 //   check lead_tip_path
-  for (size_t i = 0; i < leader_tip_path.size(); ++i) {
-    const auto& pose_msg = leader_tip_path[i];
-    Eigen::Isometry3d original_pose;
-    tf2::fromMsg(pose_msg, original_pose);
-    Eigen::Quaterniond original_orientation(original_pose.rotation());
-    std::cout << "leader tip position: " << original_pose.translation().transpose() << " orientation: " << original_orientation.coeffs().transpose() << std::endl;
-  }
+  // for (size_t i = 0; i < leader_tip_path.size(); ++i) {
+  //   const auto& pose_msg = leader_tip_path[i];
+  //   Eigen::Isometry3d original_pose;
+  //   tf2::fromMsg(pose_msg, original_pose);
+  //   Eigen::Quaterniond original_orientation(original_pose.rotation());
+  //   std::cout << "leader tip position: " << original_pose.translation().transpose() << " orientation: " << original_orientation.coeffs().transpose() << std::endl;
+  // }
 
   /************************************************************************************************************/
-  /*** Step 1: BACKWARD Planning: move second arm starting from "to" to track follower until grasping point ***/
+  /*** Step 1: BACKWARD Planning: move leader arm starting from "to" to track follower until grasping point ***/
   /***********************************************************************************************************/
   robot_trajectory::RobotTrajectoryPtr leader_track_trajectory;
 
@@ -567,7 +573,8 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   double fraction_lead = FirstArmFollow(intermediate_scene, leader_tip_path, leader_track_trajectory);
 
   if (fraction_lead < 1.0) {
-    RCLCPP_ERROR(LOGGER, "leader arm failed to track the second arm's trajectory. Fraction: %f", fraction_lead);
+    return_message = "leader arm failed to track the follower's trajectory. Fraction: " + std::to_string(fraction_lead);
+    RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
     return false;
   }else{
     RCLCPP_INFO(LOGGER, "leader arm successfully tracked the second arm's cartesian path with %zu waypoints", leader_track_trajectory->getWayPointCount());
@@ -589,12 +596,14 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
 
   // set tip_link to get cumulative arc length
   if (!leader_track_trajectory->setTipLink("right_panda_hand")) {
-    RCLCPP_ERROR(LOGGER, "Failed to set tip link for leader trajectory.");
+    return_message = "Failed to set tip link for leader trajectory.";
+    RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
     return false;
   }
 
   if (!follower_track_trajectory->setTipLink("left_panda_hand")) {
-    RCLCPP_ERROR(LOGGER, "Failed to set tip link for follower trajectory.");
+    return_message = "Failed to set tip link for follower trajectory.";
+    RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
     return false;
   }
 
@@ -610,15 +619,16 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   // Find the corresponding follower trajectory point for each leader trajectory point with desried distance plus/minus tolerance
   double start_arc_percent = 0.0;
   double end_arc_percent = 1.0;
-  double distance_tolerance = 0.003; // 5mm
+  double distance_tolerance = 0.005; // 5mm
   double rotation_tolerance = 0.1; // 5 degree
+  bool match_found = false;  // Track if a match is found
   for (size_t i = 0; i < leader_track_trajectory->getWayPointCount(); ++i) {
     double lead_arc_length = leader_track_trajectory->getWayPointDistanceFromStart(i);
     const moveit::core::RobotState& leader_state = leader_track_trajectory->getWayPoint(i);
     Eigen::Isometry3d leader_tip_transform = leader_state.getGlobalLinkTransform("right_panda_hand") * hand_to_tcp_transform_;
     // std::cout << "leader tip: "<< leader_tip_transform.translation().transpose()<<std::endl;
 
-    bool match_found = false;  // Track if a match is found
+    match_found = false;  
 
     // desired follower pose
     Eigen::Isometry3d desired_follower_tip_transform = leader_tip_transform * Eigen::Translation3d(-track_offset, 0, 0);
@@ -658,7 +668,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
       // double rotation_angle = desired_quat.angularDistance(actual_quat);
 
       // if (std::abs(translation_distance) < distance_tolerance && std::abs(rotation_angle) < rotation_tolerance) {
-        if (std::abs(magnitude_difference) < distance_tolerance && alignment > 0.95) {
+      if ((-distance_tolerance< magnitude_difference) && (magnitude_difference < distance_tolerance) && alignment > 0.95) {
         RCLCPP_INFO_STREAM(LOGGER, "Point " << i << " Arc length: " << follower_arc_length
                                             << ", distance: " << magnitude_difference
                                             << ", alignment: " << alignment);
@@ -671,13 +681,18 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     }
 
     if (!match_found) {
-      RCLCPP_ERROR_STREAM(LOGGER, "No matching point found for leader trajectory at index: " << i);
+      return_message = "No matching point found for leader trajectory at index: " + std::to_string(i);
+      RCLCPP_ERROR(LOGGER, return_message.c_str());
       return false;
     }
   }
   
   if (!follower_track_resample_trajectory->setTipLink("left_panda_hand")) {
-    RCLCPP_ERROR(LOGGER, "Failed to set tip link for follower trajectory.");
+    auto [waypoints_size, durations_size, distances_size] = follower_track_resample_trajectory->debug_sizes();
+    return_message = "Failed to set tip link for follower trajectory. Waypoints: " + std::to_string(waypoints_size) +
+                     ", Durations: " + std::to_string(durations_size) +
+                     ", Distances: " + std::to_string(distances_size);
+    RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
     return false;
   }
 
@@ -728,8 +743,8 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
       auto result_hand = pair.second->plan(start, end, follow_hand_jmg_, 
                                           props.get<double>("timeout"), follower_hand_trajectory);
       if (!result_hand) {
-        // return_message = "Follower hand planning to grasp pose failed.";
-        RCLCPP_ERROR(LOGGER, "Follower hand planning to grasp pose failed.");
+        return_message = "Follower hand planning to grasp pose failed.";
+        RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
         return false;
       }
       RCLCPP_INFO_STREAM(LOGGER, "Follower hand trajectory planning success ");
@@ -776,7 +791,8 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
       success = bool(result);
 
       if (!success) {
-      RCLCPP_ERROR_STREAM(LOGGER, "follower arm planning to goal failed: " << result.message);
+      return_message = "Follower arm planning to goal failed: " + result.message;
+      RCLCPP_ERROR(LOGGER, return_message.c_str());
       return false;
       }
 
@@ -801,7 +817,8 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
       success = bool(result);
 
       if (!success) {
-      RCLCPP_ERROR_STREAM(LOGGER, "leader arm planning to goal failed: " << result.message);
+      return_message = "Leader arm planning to goal failed: " + result.message;
+      RCLCPP_ERROR(LOGGER, return_message.c_str());
       return false;
       }
 
@@ -822,7 +839,8 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   if (leader_to_goal_trajectory){
     // Force the leader_trajectory to start after the follower_trajectory finishes the first step
     if (!splitTrajectoryWithPause(leader_to_goal_trajectory, follower_to_goal_duration, 0, delayed_leader_to_goal_trajectory, leader_to_goal_trajectories, true)) {
-        RCLCPP_ERROR(LOGGER, "Failed to delay the leader trajectory.");
+        return_message = "Failed to delay the leader trajectory.";
+        RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
         return false;
     }
     // leader_trajectory = delayed_leader_to_goal_trajectory;
@@ -833,7 +851,8 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     RCLCPP_INFO_STREAM(LOGGER, "Follower pause duration: " << pause_duration);
     auto follower_to_goal_trajectory_with_pause = std::make_shared<robot_trajectory::RobotTrajectory>(follower_trajectory->getRobotModel(), follow_jmg_);
     if (!splitTrajectoryWithPause(follower_to_goal_trajectory, leader_to_goal_duration, follower_to_goal_trajectory->getWayPointCount(), follower_to_goal_trajectory_with_pause, follower_to_goal_trajectories, false)) {
-        RCLCPP_ERROR(LOGGER, "Failed to extend the follower trajectory.");
+        return_message = "Failed to extend the follower trajectory.";
+        RCLCPP_ERROR(LOGGER, return_message.c_str());
         return false;
     }
     // follower_trajectory = follower_to_goal_trajectory_with_pause; // follower trajectory until dual arm tracking starts
@@ -923,7 +942,7 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
   const auto& props = properties();
   const moveit::core::RobotState& start_state = to.scene()->getCurrentState();
   const moveit::core::RobotState& final_state = from.scene()->getCurrentState();
-  const auto& path_constraints = props.get<moveit_msgs::msg::Constraints>("path_constraints");
+  const auto& follow_path_constraints = props.get<moveit_msgs::msg::Constraints>("follow_path_constraints");
 
   RCLCPP_INFO(LOGGER, "Computing trajectory for the follower arm.");
 
@@ -1104,7 +1123,7 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       if (pair.first == props.get<std::string>("follow_group")) {
         // Plan trajectory
         auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, 
-                                        props.get<double>("timeout"), traj_ompl_1);
+                                        props.get<double>("timeout"), traj_ompl_1, follow_path_constraints);
         // auto result_1 = pair.second->plan(start_with_cable, *eef_link, offset, target_pose, follow_jmg_,
         //                                 props.get<double>("timeout"), traj_ompl_1);
         if (!result_1) {
@@ -1127,7 +1146,7 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
         generic_ref_traj_msg.joint_trajectory[0] = robot_ref_traj_msg.joint_trajectory;
         RCLCPP_INFO_STREAM(LOGGER, "Set cartesian trajectory as initial trajectory.");
         // Plan trajectory
-        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, props.get<double>("timeout"), traj_1, generic_ref_traj_msg);
+        auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, props.get<double>("timeout"), traj_1, generic_ref_traj_msg, follow_path_constraints);
         if (!result_1) {
           return_message = "Follower arm planning to grasp pose with chomp failed.";
           RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
@@ -1245,7 +1264,7 @@ double ConnectMFReverse::FirstArmFollow(planning_scene::PlanningScenePtr& interm
   std::cout<<"leader arm tip path has " << leader_tip_path.size() << " waypoints." << std::endl;
 
   // TODO@KejiaChen: set time_parameterization to false will lead to problems
-  double fraction_lead = move_group_lead_->computeCartesianPath(leader_tip_path, 0.0005, 5.0, lead_trajectory_msg, true,
+  double fraction_lead = move_group_lead_->computeCartesianPath(leader_tip_path, 0.0001, 5.0, lead_trajectory_msg, true,
                                                                     nullptr, lead_flange_to_tcp_transform, true);
   // leader_cartesian_planner_.plan(lead_scene, leader_jmg_->getLinkModel("left_panda_hand"),
   //                                lead_grasp_frame_transform, 

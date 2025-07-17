@@ -88,8 +88,19 @@ public:
             const GroupPlannerVector& hand_planners,
             const moveit::planning_interface::MoveGroupInterfacePtr& move_group_follow,
             moveit_visual_tools::MoveItVisualTools visual_tools);
+
   void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }
+
   void init(const moveit::core::RobotModelConstPtr& robot_model) override;
+
+  /* Either Leader or Follower's Path Constraints can be set. Never set both.*/
+  // void setLeaderPathConstraints(moveit_msgs::msg::Constraints path_constraints) {
+	// 	setProperty("lead_path_constraints", std::move(path_constraints));
+	// }
+
+  void setFollowerPathConstraints(moveit_msgs::msg::Constraints path_constraints) {
+    setProperty("follow_path_constraints", std::move(path_constraints));
+  }
 
 protected:
   void compute(const InterfaceState& from, const InterfaceState& to) override;
@@ -111,7 +122,8 @@ private:
                                         // robot_trajectory::RobotTrajectoryPtr& dual_trajectory,
                                         planning_scene::PlanningScenePtr& follow_intermediate_scene,
                                         planning_scene::PlanningScenePtr& follow_final_scene,
-                                        std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes);
+                                        std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
+                                        std::string& return_message);
  
   bool ExtractSecondArmCartesianTrajectory(const robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                             const moveit::core::RobotState& final_goal_state,
