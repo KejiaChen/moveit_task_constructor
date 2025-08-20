@@ -46,7 +46,14 @@
 #include <moveit/trajectory_processing/iterative_time_parameterization.h>
 #include <moveit/trajectory_processing/ruckig_traj_smoothing.h>
 
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <vector>
+#include <cmath>
 
+#define COLOR_RED "\033[31m"
+#define COLOR_RESET "\033[0m"
 
 using namespace trajectory_processing;
 
@@ -455,7 +462,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
 
   /* Obtain the Cartesian path for the leader from the follower's Cartesian path */
   std::vector<geometry_msgs::msg::Pose> leader_tip_path;
-//   std::vector<geometry_msgs::msg::Pose> leader_hand_path;
+  //   std::vector<geometry_msgs::msg::Pose> leader_hand_path;
 
   Eigen::Isometry3d leader_hand_grasp_pose;
   Eigen::Isometry3d leader_tip_grasp_pose;
@@ -595,130 +602,376 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   }
 
   // set tip_link to get cumulative arc length
-  if (!leader_track_trajectory->setTipLink("right_panda_hand")) {
+  if (!leader_track_trajectory->setTipLink("right_panda_hand", "right_panda_link0", lead_flange_to_tcp_transform_, 0.00)) {
     return_message = "Failed to set tip link for leader trajectory.";
     RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
     return false;
   }
 
-  if (!follower_track_trajectory->setTipLink("left_panda_hand")) {
+  if (!follower_track_trajectory->setTipLink("left_panda_hand", "left_panda_link0", follow_flange_to_tcp_transform_, 0.00)) {
     return_message = "Failed to set tip link for follower trajectory.";
     RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
     return false;
   }
 
-  double follower_total_distance = follower_track_trajectory->getWayPointDistanceFromStart(follower_track_trajectory->getWayPointCount());
+  double follower_total_distance = follower_track_trajectory->getWayPointArcDistanceFromStart(follower_track_trajectory->getWayPointCount());
   std::cout << "follower track trajectory total distance: " << follower_total_distance << std::endl;
 
-  double leader_total_distance = leader_track_trajectory->getWayPointDistanceFromStart(leader_track_trajectory->getWayPointCount());
+  double leader_total_distance = leader_track_trajectory->getWayPointArcDistanceFromStart(leader_track_trajectory->getWayPointCount());
   std::cout << "leader track trajectory total distance: " << leader_total_distance << std::endl;
 
-  // resample the follower trajectory to match the leader trajectory
-  robot_trajectory::RobotTrajectoryPtr follower_track_resample_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(follower_trajectory->getRobotModel(), follow_jmg_);
+  /*******************************************resample the leader trajectory to match the leader_tip_path*****************************************/
+  robot_trajectory::RobotTrajectoryPtr leader_track_resample_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(leader_track_trajectory->getRobotModel(), leader_jmg_);
+  Eigen::Isometry3d robot_base_pose = leader_track_trajectory->getWayPoint(0).getGlobalLinkTransform("right_panda_link0");
 
-  // Find the corresponding follower trajectory point for each leader trajectory point with desried distance plus/minus tolerance
-  double start_arc_percent = 0.0;
-  double end_arc_percent = 1.0;
-  double distance_tolerance = 0.005; // 5mm
-  double rotation_tolerance = 0.1; // 5 degree
-  bool match_found = false;  // Track if a match is found
-  for (size_t i = 0; i < leader_track_trajectory->getWayPointCount(); ++i) {
-    double lead_arc_length = leader_track_trajectory->getWayPointDistanceFromStart(i);
-    const moveit::core::RobotState& leader_state = leader_track_trajectory->getWayPoint(i);
-    Eigen::Isometry3d leader_tip_transform = leader_state.getGlobalLinkTransform("right_panda_hand") * hand_to_tcp_transform_;
-    // std::cout << "leader tip: "<< leader_tip_transform.translation().transpose()<<std::endl;
+  size_t j_start = 0;
+  double last_progress = 0.0;
+  for (size_t i = 0; i < leader_tip_path.size(); ++i) {
+    const auto& pose_msg = leader_tip_path[i];
+    Eigen::Isometry3d original_pose;
+    tf2::fromMsg(pose_msg, original_pose);
+    // translation to robot base frame
+    original_pose.translation().y() -= 0.281; 
+    original_pose.translation().z() -= 1.025;
 
-    match_found = false;  
+    Eigen::Isometry3d desired_leader_tip_pose_in_base = original_pose * Eigen::Isometry3d::Identity(); // desired is the original pose
 
-    // desired follower pose
-    Eigen::Isometry3d desired_follower_tip_transform = leader_tip_transform * Eigen::Translation3d(-track_offset, 0, 0);
+    double position_error_tolerance = 0.001; // 1cm tolerance
+    std::vector<std::pair<size_t, Eigen::Isometry3d>> best_position_candidates;
+    best_position_candidates.clear();
+    double best_position_error = std::numeric_limits<double>::max();
+    size_t best_j = j_start;
 
-    // search for the follower trajectory point with incremental of 0.002
-    for (double s=start_arc_percent; s<=end_arc_percent; s+=0.001){
-      double follower_arc_length = s * follower_total_distance;
-      auto follower_interpolated_state = std::make_shared<moveit::core::RobotState>(follower_trajectory->getRobotModel());
-      follower_track_trajectory->getStateAtArcDistanceFromStart(follower_arc_length, follower_interpolated_state);
+    for (size_t j = j_start; j < leader_track_trajectory->getWayPointCount(); ++j) {
+      const moveit::core::RobotState& leader_state = leader_track_trajectory->getWayPoint(j);
+      Eigen::Isometry3d leader_ee_pose_in_world = leader_state.getGlobalLinkTransform("right_panda_hand");
+      Eigen::Isometry3d leader_ee_pose_in_base = robot_base_pose.inverse() * leader_ee_pose_in_world;
+      Eigen::Isometry3d leader_tip_pose_in_base = leader_ee_pose_in_base * lead_flange_to_tcp_transform_;
 
-      // check the distance between the follower and leader trajectory
-      Eigen::Isometry3d follower_tip_transform = follower_interpolated_state->getGlobalLinkTransform("left_panda_hand") * hand_to_tcp_transform_;
-    //   double distance = (follower_tip_transform.translation() - leader_tip_transform.translation()).norm();
-    // //   std::cout << "follower tip: "<< follower_tip_transform.translation().transpose() << " distance: " << distance << std::endl;
-
-    //   if (abs(distance - track_offset) < tolerance) {
-    //     RCLCPP_INFO_STREAM(LOGGER, "Point "<< i<<" Arc length: " << follower_arc_length << ", distance: " << distance);
-    //     follower_track_resample_trajectory->addSuffixWayPoint(follower_interpolated_state, 0.1);
-
-    //     start_arc_percent = s;
-    //     match_found = true;
-    //     break;
-    //   }
-
-      Eigen::Vector3d difference_vector = follower_tip_transform.translation() - leader_tip_transform.translation();
-      Eigen::Vector3d desired_vector(-track_offset, 0, 0);
-      Eigen::Vector3d desired_vector_world = leader_tip_transform.rotation() * desired_vector;
-      double alignment = difference_vector.normalized().dot(desired_vector_world.normalized());
-      double magnitude_difference = (difference_vector.norm() - desired_vector_world.norm());
-
-      // difference between two pose
-      // Eigen::Vector3d translation_diff = desired_follower_tip_transform.translation() - follower_tip_transform.translation();
-      // double translation_distance = translation_diff.norm();
-      
-      // Eigen::Quaterniond desired_quat(desired_follower_tip_transform.rotation());
-      // Eigen::Quaterniond actual_quat(follower_tip_transform.rotation());
-      // double rotation_angle = desired_quat.angularDistance(actual_quat);
-
-      // if (std::abs(translation_distance) < distance_tolerance && std::abs(rotation_angle) < rotation_tolerance) {
-      if ((-distance_tolerance< magnitude_difference) && (magnitude_difference < distance_tolerance) && alignment > 0.95) {
-        RCLCPP_INFO_STREAM(LOGGER, "Point " << i << " Arc length: " << follower_arc_length
-                                            << ", distance: " << magnitude_difference
-                                            << ", alignment: " << alignment);
-        follower_track_resample_trajectory->addSuffixWayPoint(follower_interpolated_state, 0.1);
-
-        start_arc_percent = s;
-        match_found = true;
-        break;
+      // check position alignment
+      double position_err = (leader_tip_pose_in_base.translation() - desired_leader_tip_pose_in_base.translation()).norm();
+      // RCLCPP_INFO_STREAM(LOGGER, "Checking position alignment for waypoint " << i << " at index " << j << " with position error: " << position_err);
+      if (position_err < best_position_error) {
+        best_position_error = position_err;
+      }
+      if (position_err < position_error_tolerance) {
+        best_position_candidates.push_back({j, leader_tip_pose_in_base});
       }
     }
 
-    if (!match_found) {
-      return_message = "No matching point found for leader trajectory at index: " + std::to_string(i);
-      RCLCPP_ERROR(LOGGER, return_message.c_str());
-      return false;
+    if (best_position_candidates.size() == 0) {
+      RCLCPP_WARN_STREAM(LOGGER, "No position candidates found for leader tip at index " << i << ". Start interpolation from index " << j_start);
+      // interpolation in Cartesian space
+      auto leader_interpolated_state = std::make_shared<moveit::core::RobotState>(leader_track_trajectory->getRobotModel());
+      int before = 0, after = 0;
+      double blend = 1.0;
+      bool interpolated = leader_track_trajectory->getStateAtPosition(desired_leader_tip_pose_in_base.translation(), leader_interpolated_state, j_start, before, after, blend);
+
+      if (!interpolated) {
+        return_message = "Failed to interpolate leader state at index " + std::to_string(i);
+        RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
+        // save trajectories locally whether match is found or not
+        dumpTrajectoryTXTIndexed(*follower_track_trajectory,  "follower_no_matching",  "left_panda_arm", "MTC_connect_visualization", follow_flange_to_tcp_transform_, "left_panda_link0"); // saves ./failed_left_001.txt, etc.
+        dumpTrajectoryTXTIndexed(*leader_track_trajectory, "leader_no_matching", "right_panda_arm", "MTC_connect_visualization", lead_flange_to_tcp_transform_, "right_panda_link0"); // saves ./failed_right_001.txt, etc.
+        dumpPathTxTIndexed(leader_tip_path, "leader_tcp_path_no_matching");
+        return false;
+      }
+      if (blend < 1){
+        j_start = before;
+      }else{
+        j_start = after;
+      }
+      leader_track_resample_trajectory->addSuffixWayPoint(leader_interpolated_state, 0.1);
+    }else{
+      // check orientation alignment
+      double orientation_error_tolerance = 1e-4;
+      std::vector<std::pair<size_t, Eigen::Isometry3d>> best_orientation_candidates;
+      best_orientation_candidates.clear();
+      double best_orientation_error = std::numeric_limits<double>::max();
+      size_t best_orientation_j = j_start;
+      for (auto & candidate : best_position_candidates) {
+        Eigen::Isometry3d candidate_transform = candidate.second;
+        const Eigen::Matrix3d original_rotation = original_pose.linear();              // or original_pose.rotation()
+        const Eigen::Matrix3d candidate_rotation = candidate_transform.linear();        // or candidate_transform.rotation()
+
+        // Ignore spin about A's local y-axis (matches your Python ignore_axis='y')
+        double orientation_err = computeRotationDistanceIgnoreAxisChar(original_rotation, candidate_rotation, 'None');
+        
+        if (orientation_err < best_orientation_error) {
+          best_orientation_error = orientation_err;
+          best_orientation_candidates.clear(); // reset the best candidates
+          best_orientation_candidates.push_back(candidate);
+          best_orientation_j = candidate.first;
+        }
+        if (orientation_err - best_orientation_error < orientation_error_tolerance) {
+          best_orientation_candidates.push_back(candidate);
+        }
+      }
+
+      if (best_orientation_candidates.size() <= 1) {
+        best_j = best_orientation_j; // use the best j from the orientation candidates
+        RCLCPP_INFO_STREAM(LOGGER, "No orientation alignment candidates found. Using best j " << best_j
+                                              <<" for waypoint i" << i
+                                              << " with position error: " << best_position_error
+                                              << " and orientation error: " << best_orientation_error);
+      }else{
+        size_t minimum_j = best_orientation_candidates[0].first;
+        for (auto & candidate : best_orientation_candidates) {
+          size_t j_candidate = candidate.first;
+          if (j_candidate > j_start && j_candidate < minimum_j) {
+            minimum_j = j_candidate;
+          }
+        }
+        best_j = minimum_j; // use the minimum j from the best candidates
+        RCLCPP_INFO_STREAM(LOGGER, "Best alignment for waypoint " << i
+                                                << " found at index " << best_j
+                                              << " with position error: " << best_position_error
+                                              << " and orientation error: " << best_orientation_error);
+      }
+
+      leader_track_resample_trajectory->addSuffixWayPoint(leader_track_trajectory->getWayPoint(best_j), 0.1);
+      j_start = best_j; // update j_start to the best j found
     }
+
   }
   
-  if (!follower_track_resample_trajectory->setTipLink("left_panda_hand")) {
-    auto [waypoints_size, durations_size, distances_size] = follower_track_resample_trajectory->debug_sizes();
-    return_message = "Failed to set tip link for follower trajectory. Waypoints: " + std::to_string(waypoints_size) +
-                     ", Durations: " + std::to_string(durations_size) +
-                     ", Distances: " + std::to_string(distances_size);
-    RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
-    return false;
-  }
-
-  std::cout << "follower track resampled trajectory:" << std::endl;
-  follower_track_resample_trajectory->print(std::cout);
-
-  if (follower_track_resample_trajectory->getWayPointCount() != leader_track_trajectory->getWayPointCount()) {
-    RCLCPP_ERROR(LOGGER, "follower and leader TRACK trajectories have different number of waypoints! follower: %zu, leader: %zu",
-    follower_track_resample_trajectory->getWayPointCount(), leader_track_trajectory->getWayPointCount());
-  }
 
   // phase_1_scene: scene after tracking
   planning_scene::PlanningScenePtr phase_1_scene; // TODO@KejiaChen: is phase_3_scene the same as intermediate_scene?
   planning_scene::PlanningScenePtr temp_start = start->diff();
-  updateDualIntermediateState(leader_track_trajectory->getLastWayPoint(), follower_track_resample_trajectory->getLastWayPoint(), temp_start, phase_1_scene);
+  updateDualIntermediateState(leader_track_resample_trajectory->getLastWayPoint(), follower_track_trajectory->getLastWayPoint(), temp_start, phase_1_scene);
 
-  robot_trajectory::RobotTrajectoryPtr original_follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(follower_trajectory->getRobotModel(), follow_jmg_);
-  // Append them to trajectory
-  leader_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*leader_track_trajectory);
-  follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*follower_track_resample_trajectory);
+  leader_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*leader_track_resample_trajectory);
+  follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*follower_track_trajectory);
   // Add them to the vector
-  leader_trajectories.push_back({"leader_arm", leader_track_trajectory});
-  follower_trajectories.push_back({"follower_arm", follower_track_resample_trajectory});
-  
+  leader_trajectories.push_back({"leader_arm", leader_track_resample_trajectory});
+  follower_trajectories.push_back({"follower_arm", follower_track_trajectory});
+
   // intermediate secene is added in a reverse order
   intermediate_scenes.push_back(phase_1_scene);
+
+  /**********************************************************************************************************************/
+
+  // /****************************resample the follower trajectory to match the leader trajectory **************************/
+  // robot_trajectory::RobotTrajectoryPtr follower_track_resample_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(follower_trajectory->getRobotModel(), follow_jmg_);
+
+  // /* Find the corresponding follower trajectory point for each leader trajectory point with desried distance plus/minus tolerance */
+  // double start_arc_percent = 0.0;
+  // double end_arc_percent = 1.0;
+  // double distance_tolerance = 0.005; // 5mm
+  // double rotation_tolerance = 0.99; 
+  // bool match_found = false;  // Track if a match is found
+  // for (size_t i = 0; i < leader_track_trajectory->getWayPointCount(); ++i) {
+  //   double lead_arc_length = leader_track_trajectory->getWayPointArcDistanceFromStart(i);
+  //   const moveit::core::RobotState& leader_state = leader_track_trajectory->getWayPoint(i);
+  //   Eigen::Isometry3d leader_tip_pose = leader_state.getGlobalLinkTransform("right_panda_hand") * hand_to_tcp_transform_;
+  //   // std::cout << "leader tip: "<< leader_tip_pose.translation().transpose()<<std::endl;
+
+  //   match_found = false;  
+    
+  //   std::vector<MatchQuality> candidate_buffer;
+  //   double best_score = std::numeric_limits<double>::max();
+  //   MatchQuality best_candidate;
+  //   // bool has_best = false;
+
+  //   if ((i < 3) || (leader_track_trajectory->getWayPointCount() - i < 5)) {
+  //     // For the first and last 5 waypoints, use a smaller rotation tolerance
+  //     rotation_tolerance = 0.997;
+  //     distance_tolerance = 0.002;
+  //   } else {
+  //     rotation_tolerance = 0.98; // 0.99 is a good value for the rest of the trajectory
+  //     distance_tolerance = 0.005; // 5mm
+  //   }
+    
+  //   // search for the follower trajectory point with incremental of 0.002
+  //   for (double s=start_arc_percent; s<=end_arc_percent; s+=0.001){
+  //     double follower_arc_length = s * follower_total_distance;
+  //     auto follower_interpolated_state = std::make_shared<moveit::core::RobotState>(follower_trajectory->getRobotModel());
+  //     follower_track_trajectory->getStateAtArcDistanceFromStart(follower_arc_length, follower_interpolated_state);
+
+  //     if (i == 0){
+  //       follower_track_resample_trajectory->addSuffixWayPoint(follower_interpolated_state, 0.1);
+  //       start_arc_percent = s;
+  //       match_found = true;
+  //       break;
+  //     }
+
+  //     // check the distance between the follower and leader trajectory
+  //     Eigen::Isometry3d follower_tip_transform = follower_interpolated_state->getGlobalLinkTransform("left_panda_hand") * hand_to_tcp_transform_;
+
+  //     Eigen::Vector3d difference_vector = follower_tip_transform.translation() - leader_tip_pose.translation();
+  //     Eigen::Vector3d desired_vector(-track_offset, 0, 0);
+  //     Eigen::Vector3d desired_vector_world = leader_tip_pose.rotation() * desired_vector;
+  //     double alignment = difference_vector.normalized().dot(desired_vector_world.normalized());
+  //     double magnitude_difference = (difference_vector.norm() - desired_vector_world.norm());
+  //     double score = 0.5*std::abs(magnitude_difference) + (1.0 - alignment);
+
+  //     RCLCPP_INFO_STREAM(LOGGER, "Point " << i << " Arc length: " << follower_arc_length
+  //                                             << "Arc percent: " << s
+  //                                             << ", distance: " << magnitude_difference
+  //                                             << ", alignment: " << alignment
+  //                                             << ", score: " << score);
+
+  //     candidate_buffer.push_back({follower_arc_length, follower_interpolated_state, magnitude_difference, alignment, score});
+
+  //     // if (std::abs(magnitude_difference) < minimum_distance && alignment > maximum_alignment) {
+  //     //   minimum_distance = std::abs(magnitude_difference);
+  //     //   maximum_alignment = alignment;
+  //     // }
+
+  //     // if (std::abs(magnitude_difference) < distance_tolerance && alignment > 0.97) {
+  //     //   if (!has_best || score < best_score) {
+  //     //     best_score = score;
+  //     //     best_candidate = {s, follower_interpolated_state, magnitude_difference, alignment};
+  //     //     has_best = true;
+  //     //   }
+  //     // }
+
+  //     // difference between two pose
+  //     // Eigen::Isometry3d desired_follower_tip_transform = leader_tip_pose * Eigen::Translation3d(-track_offset, 0, 0);
+  //     // Eigen::Vector3d translation_diff = desired_follower_tip_transform.translation() - follower_tip_transform.translation();
+  //     // double translation_distance = translation_diff.norm();
+      
+  //     // Eigen::Quaterniond desired_quat(desired_follower_tip_transform.rotation());
+  //     // Eigen::Quaterniond actual_quat(follower_tip_transform.rotation());
+  //     // double rotation_angle = desired_quat.angularDistance(actual_quat);
+
+  //     /*Option1: return first found*/
+  //     // if (std::abs(translation_distance) < distance_tolerance && std::abs(rotation_angle) < rotation_tolerance) {
+  //     if ((-distance_tolerance< magnitude_difference) && (magnitude_difference < distance_tolerance) && alignment > rotation_tolerance) {
+  //       RCLCPP_INFO_STREAM(LOGGER, "Point " << i << " Arc length: " << follower_arc_length
+  //                                           << ", distance: " << magnitude_difference
+  //                                           << ", alignment: " << alignment);
+  //       follower_track_resample_trajectory->addSuffixWayPoint(follower_interpolated_state, 0.1);
+
+  //       start_arc_percent = s;
+  //       match_found = true;
+  //       break;
+  //     }
+
+  //     /*Option2: store all candidates and check for local minimum*/
+  //     // Once we have at least 3 samples, check for local minimum
+  //     // if (candidate_buffer.size() >= 3) {
+  //     //   const auto& prev = candidate_buffer[candidate_buffer.size() - 3];
+  //     //   const auto& curr = candidate_buffer[candidate_buffer.size() - 2];
+  //     //   const auto& next = candidate_buffer[candidate_buffer.size() - 1];
+        
+  //     //   bool good_candidate = std::abs(curr.magnitude_diff) < distance_tolerance && curr.alignment > 0.97;
+  //     //   if (good_candidate){
+  //     //     if (curr.score < best_score) {
+  //     //       best_score = curr.score;
+  //     //       best_candidate = candidate_buffer.back();
+  //     //     }
+
+  //     //     bool local_min = curr.score <= next.score;
+  //     //     if (local_min) {
+  //     //       RCLCPP_INFO_STREAM(LOGGER, COLOR_RED << "Point " << i << " Arc length: " << curr.arc_length
+  //     //                                           << "Arc percent: " << curr.arc_length / follower_total_distance
+  //     //                                           << ", distance: " << curr.magnitude_diff
+  //     //                                           << ", alignment: " << curr.alignment
+  //     //                                           << ", score: " << curr.score << COLOR_RESET);
+  //     //       follower_track_resample_trajectory->addSuffixWayPoint(curr.state, 0.1);
+
+  //     //       start_arc_percent = curr.arc_length / follower_total_distance;
+  //     //       match_found = true;
+  //     //       break;
+  //     //     }else{
+  //     //       // return the bast candidate if no local minimum found
+  //     //       RCLCPP_INFO_STREAM(LOGGER, COLOR_RED << "Point " << i << " Arc length: " << best_candidate.arc_length
+  //     //                                           << "Arc percent: " << best_candidate.arc_length / follower_total_distance
+  //     //                                           << ", distance: " << best_candidate.magnitude_diff
+  //     //                                           << ", alignment: " << best_candidate.alignment
+  //     //                                           << ", score: " << best_candidate.score << COLOR_RESET);
+  //     //       follower_track_resample_trajectory->addSuffixWayPoint(best_candidate.state, 0.1);
+  //     //       start_arc_percent = best_candidate.arc_length / follower_total_distance;
+  //     //       match_found = true;
+  //     //       break;   
+  //     //     }
+  //     //   }
+
+  //     //   // Optionally pop front to save memory (keep only 3 entries)
+  //     //   if (candidate_buffer.size() > 3) {
+  //     //     candidate_buffer.erase(candidate_buffer.begin());
+  //     //   }
+  //     // }
+      
+  //   }
+  //   /******************************************************************************************************************** */
+
+    // if (!match_found) { 
+    //   return_message = "No matching point found for leader trajectory at index: " + std::to_string(i);
+    //   RCLCPP_ERROR(LOGGER, return_message.c_str());
+
+    //   // save trajectories locally whether match is found or not
+    //   dumpTrajectoryTXTIndexed(*follower_track_trajectory,  "follower_no_matching",  "left_panda_arm", "MTC_connect_visualization", follow_flange_to_tcp_transform_, "left_panda_link0"); // saves ./failed_left_001.txt, etc.
+    //   dumpTrajectoryTXTIndexed(*leader_track_trajectory, "leader_no_matching", "right_panda_arm", "MTC_connect_visualization", lead_flange_to_tcp_transform_, "right_panda_link0"); // saves ./failed_right_001.txt, etc.
+      
+    //   // save leader tip path
+    //   dumpPathTxTIndexed(leader_tip_path, "leader_tcp_path_no_matching"); // saves ./failed_right_path_001.txt, etc.
+
+    //   return false;
+    // }
+    
+  // }
+
+  // // Fill the remaining tail of the follower trajectory
+  // double last_matched_arc_length = start_arc_percent * follower_total_distance;
+  // int before_idx, after_idx;
+  // double blend;
+  // follower_track_trajectory->findWayPointIndicesForArcDistanceAfterStart(last_matched_arc_length, before_idx, after_idx, blend);
+
+  // if (after_idx < (follower_track_trajectory->getWayPointCount()-1)){
+  //   for (size_t i = after_idx; i < follower_track_trajectory->getWayPointCount(); ++i) {
+  //     const auto& state = follower_track_trajectory->getWayPointPtr(i);
+  //     follower_track_resample_trajectory->addSuffixWayPoint(state, 0.1);
+
+  //     // pad the leader trajectory with the last point
+  //     auto last_leader_state = leader_track_trajectory->getWayPointPtr(leader_track_trajectory->getWayPointCount() - 1);
+  //     leader_track_trajectory->addSuffixWayPoint(last_leader_state, 0.1);
+  //   }
+  // }else{
+  //   // add the last point of the follower trajectory
+  //   const auto& state = follower_track_trajectory->getWayPointPtr(follower_track_trajectory->getWayPointCount() - 1);
+  //   // double dt = follower_track_trajectory->getDurationFromPrevious(follower_track_trajectory->getWayPointCount() - 1);
+  //   follower_track_resample_trajectory->addSuffixWayPoint(state, 0.1);
+
+  //   // pad the leader trajectory with the last point
+  //   auto last_leader_state = leader_track_trajectory->getWayPointPtr(leader_track_trajectory->getWayPointCount() - 1);
+  //   leader_track_trajectory->addSuffixWayPoint(last_leader_state, 0.1);  
+  // }
+
+  // if (!follower_track_resample_trajectory->setTipLink("left_panda_hand", 0.00)) {
+  //   auto [waypoints_size, durations_size, distances_size] = follower_track_resample_trajectory->debug_sizes();
+  //   return_message = "Failed to set tip link for follower trajectory. Waypoints: " + std::to_string(waypoints_size) +
+  //                    ", Durations: " + std::to_string(durations_size) +
+  //                    ", Distances: " + std::to_string(distances_size);
+  //   RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
+  //   return false;
+  // }
+
+  // std::cout << "follower track resampled trajectory:" << std::endl;
+  // follower_track_resample_trajectory->print(std::cout);
+
+  // if (follower_track_resample_trajectory->getWayPointCount() != leader_track_trajectory->getWayPointCount()) {
+  //   RCLCPP_ERROR(LOGGER, "follower and leader TRACK trajectories have different number of waypoints! follower: %zu, leader: %zu",
+  //   follower_track_resample_trajectory->getWayPointCount(), leader_track_trajectory->getWayPointCount());
+  // }
+
+  // // phase_1_scene: scene after tracking
+  // planning_scene::PlanningScenePtr phase_1_scene; // TODO@KejiaChen: is phase_3_scene the same as intermediate_scene?
+  // planning_scene::PlanningScenePtr temp_start = start->diff();
+  // updateDualIntermediateState(leader_track_trajectory->getLastWayPoint(), follower_track_resample_trajectory->getLastWayPoint(), temp_start, phase_1_scene);
+
+  // robot_trajectory::RobotTrajectoryPtr original_follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(follower_trajectory->getRobotModel(), follow_jmg_);
+  // // Append them to trajectory
+  // leader_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*leader_track_trajectory);
+  // follower_trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(*follower_track_resample_trajectory);
+  // // Add them to the vector
+  // leader_trajectories.push_back({"leader_arm", leader_track_trajectory});
+  // follower_trajectories.push_back({"follower_arm", follower_track_resample_trajectory});
+  
+  // // intermediate secene is added in a reverse order
+  // intermediate_scenes.push_back(phase_1_scene);
 
   /*******************************************/
   /*** Step 1.5: Grasping of follower arm ***/
@@ -901,6 +1154,15 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
 //   intermediate_scenes.push_back(phase_3_scene);
   intermediate_scenes.push_back(goal_scene);
 
+  // store successful trajectories
+  dumpTrajectoryTXTIndexed(*follower_track_trajectory,  "follower_success",  "left_panda_arm", "MTC_connect_visualization", follow_flange_to_tcp_transform_, "left_panda_link0"); 
+  // dumpTrajectoryTXTIndexed(*follower_track_resample_trajectory,  "follower_success_resample",  "left_panda_arm", "MTC_connect_visualization", follow_flange_to_tcp_transform_, "left_panda_link0");
+  dumpTrajectoryTXTIndexed(*leader_track_trajectory, "leader_success", "right_panda_arm", "MTC_connect_visualization", lead_flange_to_tcp_transform_, "right_panda_link0");
+  dumpTrajectoryTXTIndexed(*leader_track_resample_trajectory, "leader_success_resample", "right_panda_arm", "MTC_connect_visualization", lead_flange_to_tcp_transform_, "right_panda_link0");
+
+  // save leader tip path
+  dumpPathTxTIndexed(leader_tip_path, "leader_tcp_path_success"); // saves ./failed_right_path_001.txt, etc.
+
   return true;
 }
 
@@ -997,6 +1259,7 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
   robot_trajectory::RobotTrajectoryPtr traj_1;
   robot_trajectory::RobotTrajectoryPtr traj_cartesian;
   Eigen::Isometry3d target_pose;
+  Eigen::Isometry3d follower_grasp_pose_tcp;
   for (const auto& pair: cartesian_planner_) {
   // for (const auto& pair: planner_) {
     if (pair.first == props.get<std::string>("follow_group")) {
@@ -1013,7 +1276,6 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
 
       // Option 1: Get the follower_grasp_pose in world frame as target
       geometry_msgs::msg::PoseStamped follower_grasp_pos_msg = props.get<geometry_msgs::msg::PoseStamped>("follow_grasp_pose");
-      Eigen::Isometry3d follower_grasp_pose_tcp;
       tf2::fromMsg(follower_grasp_pos_msg.pose, follower_grasp_pose_tcp);
       Eigen::Quaterniond grasp_orientation(follower_grasp_pose_tcp.rotation());
       
@@ -1168,12 +1430,23 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       follower_trajectory->append(*traj_1, 0.1);
       follower_start_index_ = follower_trajectory->getWayPointCount();
       RCLCPP_INFO_STREAM(LOGGER, "follower arm trajectory start index: " << follower_start_index_);
+
+      // Compare the reached follower pose with the target pose
+      Eigen::Isometry3d follower_tip_transform = intermediate_state.getGlobalLinkTransform("left_panda_hand") * hand_to_tcp_transform_;
+      Eigen::Vector3d follower_tip_position = follower_tip_transform.translation();
+      // Eigen::Quaterniond follower_tip_orientation(follower_tip_transform.rotation());
+      Eigen::Vector3d goal_position = follower_grasp_pose_tcp.translation();
+      // Eigen::Quaterniond target_orientation(target_pose.rotation());
+      double position_difference = (follower_tip_position - goal_position).norm();
+      // double orientation_difference = follower_tip_orientation.angularDistance(target_orientation);
+      RCLCPP_INFO_STREAM(LOGGER, "Position difference between the target pose and the planned pose at grasping for the follower arm: " << position_difference);
     } else {
       RCLCPP_WARN(LOGGER, "Arm trajectory is empty.");
     }
 
     // Detach the cable from the follower arm
     detachCollisionCable(start_with_cable, object_id);
+
   }
   
   // ---- Step 2: Plan from grasping to start ----
@@ -1264,7 +1537,7 @@ double ConnectMFReverse::FirstArmFollow(planning_scene::PlanningScenePtr& interm
   std::cout<<"leader arm tip path has " << leader_tip_path.size() << " waypoints." << std::endl;
 
   // TODO@KejiaChen: set time_parameterization to false will lead to problems
-  double fraction_lead = move_group_lead_->computeCartesianPath(leader_tip_path, 0.0001, 5.0, lead_trajectory_msg, true,
+  double fraction_lead = move_group_lead_->computeCartesianPath(leader_tip_path, 0.0001, 3.0, lead_trajectory_msg, true,
                                                                     nullptr, lead_flange_to_tcp_transform, true);
   // leader_cartesian_planner_.plan(lead_scene, leader_jmg_->getLinkModel("left_panda_hand"),
   //                                lead_grasp_frame_transform, 

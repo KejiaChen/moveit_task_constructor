@@ -46,6 +46,14 @@
 #include <moveit/task_constructor/solvers/cartesian_path.h>
 #include <moveit/task_constructor/solvers/pipeline_planner.h>
 
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+
 namespace moveit {
 namespace core {
 MOVEIT_CLASS_FORWARD(RobotState);
@@ -67,6 +75,239 @@ namespace stages {
  */
 using GroupPoseDict = std::map<std::string, geometry_msgs::msg::PoseStamped>;
 using GroupStringDict = std::map<std::string, std::string>;
+
+// ---- 1) Dump one trajectory to a TXT file: time, q..., dq... ----
+inline bool dumpTrajectoryTXT(const robot_trajectory::RobotTrajectory& traj,
+                              const std::string& joint_filename,
+                              const std::string& tcp_filename,
+                              const std::string& group_name = "",
+                              const Eigen::Isometry3d &offset = Eigen::Isometry3d::Identity(),
+                              std::string base_link_name = "base_link",
+                              char delim = ' ',          // use ' ' for space-separated
+                              int precision = 6,
+                              double fallback_dt = -1.0) // e.g., 0.05 if times are all zero
+{
+  const std::string group = group_name.empty() ? traj.getGroupName() : group_name;
+  const auto* jmg = traj.getRobotModel()->getJointModelGroup(group);
+  if (!jmg) return false;
+
+  std::vector<const moveit::core::LinkModel*> tips;
+  if (!jmg->getEndEffectorTips(tips) || tips.empty())
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Unable to get end effector tips from jmg");
+    return false;
+  }
+
+  const auto& names = jmg->getVariableNames();
+  const size_t N = names.size();
+  const size_t M = traj.getWayPointCount();
+  if (M == 0 || N == 0) return false;
+
+  std::filesystem::create_directories(std::filesystem::path(joint_filename).parent_path());
+  std::ofstream joint_out(joint_filename);
+  if (!joint_out) return false;
+  joint_out.setf(std::ios::fixed, std::ios::floatfield);
+  joint_out << std::setprecision(precision);
+
+  std::filesystem::create_directories(std::filesystem::path(tcp_filename).parent_path());
+  std::ofstream tcp_out(tcp_filename);
+  if (!tcp_out) return false;
+  tcp_out.setf(std::ios::fixed, std::ios::floatfield);
+  tcp_out << std::setprecision(precision);
+
+  // // Header
+  // out << "# time";
+  // for (auto& n : names) out << delim << "q/" << n;
+  // for (auto& n : names) out << delim << "dq/" << n;
+  // out << "\n";
+
+  // Gather data
+  std::vector<double> T(M, 0.0);
+  std::vector<std::vector<double>> Q(M, std::vector<double>(N, 0.0));
+  std::vector<std::vector<double>> dQ(M, std::vector<double>(N, 0.0));
+  std::vector<Eigen::Isometry3d> TCP_pose_in_world(M, Eigen::Isometry3d::Identity());
+  std::vector<Eigen::Isometry3d> TCP_pose_in_base(M, Eigen::Isometry3d::Identity());
+
+  bool any_velocity = false;
+  Eigen::Isometry3d robot_base_pose = traj.getWayPoint(0).getGlobalLinkTransform(base_link_name);
+  for (size_t i = 0; i < M; ++i) {
+    const auto& s = traj.getWayPoint(i);
+    T[i] = traj.getWayPointDurationFromStart(i);
+    s.copyJointGroupPositions(jmg, Q[i]);
+    s.copyJointGroupVelocities(jmg, dQ[i]); // zeros if not set
+
+    for (const moveit::core::LinkModel* ee_parent_link : tips){
+      // pose in world frame for publishing
+      Eigen::Isometry3d ee_pose_in_world= s.getGlobalLinkTransform(ee_parent_link);
+      // Apply the translation in the z-axis
+      Eigen::Isometry3d tcp_pose_in_world = ee_pose_in_world*offset;
+      TCP_pose_in_world[i] = tcp_pose_in_world;
+
+      // ee_pose in robot base frame for storage 
+      Eigen::Isometry3d ee_pose_in_base = robot_base_pose.inverse()*ee_pose_in_world;
+      // Apply the translation in the z-axiss
+      Eigen::Isometry3d tcp_pose_in_base = ee_pose_in_base*offset;
+      TCP_pose_in_base[i] = tcp_pose_in_base;
+    }
+
+    for (double v : dQ[i]) if (std::abs(v) > 1e-12) { any_velocity = true; break; }
+  }
+
+  // Dump rows
+  for (size_t i = 0; i < M; ++i) {
+    joint_out << T[i];
+    for (size_t j = 0; j < N; ++j) joint_out << delim << Q[i][j];
+    for (size_t j = 0; j < N; ++j) joint_out << delim << dQ[i][j];
+    joint_out << "\n";
+  }
+
+  // Dump TCP poses
+  for (size_t i = 0; i < M; ++i) {
+    tcp_out << T[i];
+    for (int col = 0; col < 4; ++col) {
+      for (int row = 0; row < 4; ++row) {
+        tcp_out << delim << TCP_pose_in_base[i](row, col);
+      }
+    }
+    tcp_out << "\n";  // Newline for the next matrix
+  }
+
+  return true;
+}
+
+// ---- 2) Auto-incremented filename in a directory (current folder by default) ----
+inline std::filesystem::path nextIndexedFile(const std::filesystem::path& dir,
+                                              const std::string& prefix,
+                                              const std::string& ext = ".txt",
+                                              int width = 3,
+                                              int start_index = 1)
+{
+  std::filesystem::create_directories(dir);
+  int max_idx = start_index - 1;
+
+  for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+    if (!entry.is_regular_file()) continue;
+    const auto name = entry.path().filename().string();
+
+    // check prefix_
+    if (name.size() < prefix.size() + 1 + ext.size()) continue;
+    if (name.compare(0, prefix.size(), prefix) != 0) continue;
+    if (name[prefix.size()] != '_') continue;
+
+    // check suffix .ext
+    if (name.compare(name.size() - ext.size(), ext.size(), ext) != 0) continue;
+
+    // digits in the middle
+    const auto digits = name.substr(prefix.size() + 1,
+                                    name.size() - prefix.size() - 1 - ext.size());
+    if (digits.empty() || !std::all_of(digits.begin(), digits.end(),
+                                       [](unsigned char c){ return std::isdigit(c); }))
+      continue;
+
+    int idx = std::stoi(digits);
+    if (idx > max_idx) max_idx = idx;
+  }
+
+  const int next = std::max(start_index, max_idx + 1);
+  std::ostringstream oss;
+  oss << prefix << "_" << std::setw(width) << std::setfill('0') << next << ext;
+  return dir / oss.str();
+}
+
+// ---- 3) Convenience: dump with auto-index into current folder ----
+inline bool dumpTrajectoryTXTIndexed(const robot_trajectory::RobotTrajectory& traj,
+                                     const std::string& prefix,
+                                     const std::string& group_name = "",
+                                     const std::filesystem::path& dir = std::filesystem::current_path(),
+                                     const Eigen::Isometry3d &offset = Eigen::Isometry3d::Identity(),
+                                      std::string base_link_name = "base_link",
+                                     char delim = ' ', int precision = 6,
+                                     double fallback_dt = 0.05, // pick something reasonable
+                                     int width = 3, int start_index = 1)
+{
+  const auto joint_path = nextIndexedFile(dir, prefix + "_joint", ".txt", width, start_index);
+  const auto tcp_path = nextIndexedFile(dir, prefix + "_tcp", ".txt", width, start_index);
+  RCLCPP_INFO(rclcpp::get_logger("RobotTrajectory"),
+            "Dumping trajectory to %s", joint_path.string().c_str());
+  return dumpTrajectoryTXT(traj, joint_path.string(), tcp_path.string(), group_name, offset, base_link_name, delim, precision, fallback_dt);
+}
+
+inline bool dumpPathTxTIndexed(const std::vector<geometry_msgs::msg::Pose>& path,
+                              const std::string& prefix,
+                              char delim = ' ', 
+                              int precision = 6)
+{
+  std::string filename = nextIndexedFile("MTC_connect_visualization", prefix, ".txt", 3, 1);
+  std::ofstream out(filename);
+  if (!out) return false;
+  out.setf(std::ios::fixed, std::ios::floatfield);
+  out << std::setprecision(precision);
+
+  for (const auto& pose : path)
+  {
+    out << pose.position.x << delim
+        << pose.position.y << delim
+        << pose.position.z << delim
+        << pose.orientation.x << delim
+        << pose.orientation.y << delim
+        << pose.orientation.z << delim
+        << pose.orientation.w << "\n";
+  }
+  return true;
+}
+
+inline double computeRotationDistance(
+    const Eigen::Matrix3d& Ra,
+    const Eigen::Matrix3d& Rb)
+{
+  const Eigen::Matrix3d R_rel = Ra.transpose() * Rb;
+  const Eigen::AngleAxisd aa(R_rel);
+  // angle in [0, pi], axis expressed in Ra frame
+  return aa.angle();
+}
+
+inline double computeRotationDistanceIgnoreAxisChar(
+    const Eigen::Matrix3d& Ra,
+    const Eigen::Matrix3d& Rb,
+    char ignore_axis) // 'x'|'y'|'z' (case-insensitive)
+{
+  const Eigen::Matrix3d R_rel = Ra.transpose() * Rb;
+  const Eigen::AngleAxisd aa(R_rel);
+  Eigen::Vector3d w = aa.angle() * aa.axis();  // rotation vector in Ra frame
+
+  char ax = static_cast<char>(std::tolower(ignore_axis));
+  Eigen::Vector3d v(0,0,0);
+  if (ax == 'x') v = Eigen::Vector3d::UnitX();
+  else if (ax == 'y') v = Eigen::Vector3d::UnitY();
+  else if (ax == 'z') v = Eigen::Vector3d::UnitZ();
+  else return w.norm(); // unknown char → no ignore
+
+  const double n = v.norm();
+  if (n < 1e-12) return w.norm();
+  v /= n;
+
+  const Eigen::Vector3d w_perp = w - v * (v.dot(w)); // remove spin about v
+  return w_perp.norm();
+}
+
+inline double computeRotationDistanceIgnoreAxisVec(
+    const Eigen::Matrix3d& Ra,
+    const Eigen::Matrix3d& Rb,
+    const Eigen::Vector3d& ignore_axis_in_Ra) // already in Ra frame
+{
+  const Eigen::Matrix3d R_rel = Ra.transpose() * Rb;
+  const Eigen::AngleAxisd aa(R_rel);
+  Eigen::Vector3d w = aa.angle() * aa.axis();  // rotation vector in Ra frame
+
+  Eigen::Vector3d v = ignore_axis_in_Ra;
+  const double n = v.norm();
+  if (n < 1e-12) return w.norm();
+  v /= n;
+
+  const Eigen::Vector3d w_perp = w - v * (v.dot(w));
+  return w_perp.norm();
+}
+
 
 class ConnectMFReverse : public Connect
 {
@@ -106,6 +347,14 @@ protected:
   void compute(const InterfaceState& from, const InterfaceState& to) override;
 
 private:
+  struct MatchQuality {
+    double arc_length;
+    std::shared_ptr<moveit::core::RobotState> state;
+    double magnitude_diff;
+    double alignment;
+    double score;
+  };
+
   bool computeSecondArmTrajectoryReverse(const InterfaceState& from, const InterfaceState& to,
                                         robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                         planning_scene::PlanningScenePtr& intermediate_scene,
