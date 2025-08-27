@@ -53,6 +53,7 @@
 #include <vector>
 #include <algorithm>
 #include <cctype>
+#include <tf2_eigen/tf2_eigen.hpp>
 
 namespace moveit {
 namespace core {
@@ -347,13 +348,13 @@ protected:
   void compute(const InterfaceState& from, const InterfaceState& to) override;
 
 private:
-  struct MatchQuality {
-    double arc_length;
-    std::shared_ptr<moveit::core::RobotState> state;
-    double magnitude_diff;
-    double alignment;
-    double score;
-  };
+  // struct MatchQuality {
+  //   double arc_length;
+  //   std::shared_ptr<moveit::core::RobotState> state;
+  //   double magnitude_diff;
+  //   double alignment;
+  //   double score;
+  // };
 
   bool computeSecondArmTrajectoryReverse(const InterfaceState& from, const InterfaceState& to,
                                         robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
@@ -389,7 +390,7 @@ private:
                         robot_trajectory::RobotTrajectoryPtr& lead_trajectory);
 
   SubTrajectoryPtr mergeIgnoreCollision(const std::vector<PlannerIdTrajectoryPair>& sub_trajectories,
-                                  // const std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
+                                  const planning_scene::PlanningSceneConstPtr& intermediate_scene,
                                   const moveit::core::RobotState& state);
   
   bool splitTrajectoryWithPause(const robot_trajectory::RobotTrajectoryPtr& trajectory,
@@ -428,6 +429,30 @@ private:
   moveit_msgs::msg::Constraints setBoxConstraint(planning_scene::PlanningSceneConstPtr start,
                                                     planning_scene::PlanningSceneConstPtr end,
                                                     std::string constraint_link_name);
+
+  moveit_msgs::msg::Constraints setOrientationConstraint(const moveit::core::RobotState& current_state, 
+                                                        const std::string& constraint_link_name)
+  { 
+    const auto& current_pose = current_state.getGlobalLinkTransform(constraint_link_name);
+    Eigen::Quaterniond current_orientation(current_pose.rotation());
+
+    // Create orientation constraint
+    moveit_msgs::msg::OrientationConstraint orientation_constraint;
+    orientation_constraint.header.frame_id = "world";
+    orientation_constraint.link_name = constraint_link_name;
+    orientation_constraint.orientation = tf2::toMsg(current_orientation);
+    orientation_constraint.parameterization = moveit_msgs::msg::OrientationConstraint::XYZ_EULER_ANGLES;  
+    orientation_constraint.absolute_x_axis_tolerance = M_PI;     // free
+    orientation_constraint.absolute_y_axis_tolerance = M_PI;     // LOCK twist about local Y axis
+    orientation_constraint.absolute_z_axis_tolerance = M_PI;     // free
+    orientation_constraint.weight = 1.0;
+    
+    // Wrap in a generic Constraints message
+    moveit_msgs::msg::Constraints orientation_constraints;
+    orientation_constraints.orientation_constraints.emplace_back(orientation_constraint);
+
+    return orientation_constraints;
+  }
   
   // moveit_msgs::msg::Constraints createTrajectoryConstraintsFromTrajectory(const moveit_msgs::msg::RobotTrajectory& robot_traj_msg);
 

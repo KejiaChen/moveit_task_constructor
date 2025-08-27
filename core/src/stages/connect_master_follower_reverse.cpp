@@ -42,7 +42,6 @@
 #include <moveit/task_constructor/merge.h>
 #include <moveit/planning_scene/planning_scene.h>
 #include <geometry_msgs/msg/pose_stamped.hpp>
-#include <tf2_eigen/tf2_eigen.hpp>
 #include <moveit/trajectory_processing/iterative_time_parameterization.h>
 #include <moveit/trajectory_processing/ruckig_traj_smoothing.h>
 
@@ -259,6 +258,7 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
 
     // Merge each subtrajectory sequentially
     std::vector<PlannerIdTrajectoryPair> dual_sub_trajectories;
+    std::string dual_merge_msg = "";
     for (int i = 0; i < leader_trajectories.size(); ++i) {
       if (i==follower_grasp_index_) {
         // Add follower hand trajectory at the grasp index
@@ -270,10 +270,11 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
         sub_trajectories.push_back({"leader_arm", leader_trajectories[i].trajectory});
         sub_trajectories.push_back({"follower_arm", follower_trajectories[i].trajectory});
 
-        SubTrajectoryPtr dual_sub_trajectory = mergeIgnoreCollision(sub_trajectories, from.scene()->getCurrentState());
+        SubTrajectoryPtr dual_sub_trajectory = mergeIgnoreCollision(sub_trajectories, intermediate_scenes[i], from.scene()->getCurrentState());
         if (!dual_sub_trajectory) {
-        RCLCPP_ERROR_STREAM(LOGGER, "Failed to merge sub trajectories of phase " << i);
-        continue;
+          dual_merge_msg = "Failed to merge sub trajectories of phase " + std::to_string(i);
+          RCLCPP_ERROR_STREAM(LOGGER, "Failed to merge sub trajectories of phase " << i);
+          continue;
         }
 
         dual_sub_trajectories.push_back({"dual_arm", dual_sub_trajectory->trajectory()});
@@ -282,6 +283,10 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
 
     SolutionBasePtr solution;
     solution = makeSequential(dual_sub_trajectories, intermediate_scenes, from, to);
+    if (dual_merge_msg != "") {
+      solution->markAsFailure(dual_merge_msg);
+      RCLCPP_ERROR_STREAM(LOGGER, dual_merge_msg);
+    }
 
     // SolutionBasePtr solution;
     // // solution = std::make_shared<SubTrajectory>(reversed_follower_trajectory, 0.0, "connect_master_follower");
@@ -411,6 +416,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
 
   const auto& props = properties();
   const moveit::core::RobotState& initial_state = follow_final_scene->getCurrentState();
+  Eigen::Isometry3d leader_initial_pose_tcp = initial_state.getGlobalLinkTransform("right_panda_hand") * hand_to_tcp_transform_;
   Eigen::Quaterniond leader_initial_orientation(initial_state.getGlobalLinkTransform("right_panda_hand").rotation());
   leader_jmg_ = initial_state.getJointModelGroup(props.get<std::string>("lead_group"));
 
@@ -466,8 +472,9 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
 
   Eigen::Isometry3d leader_hand_grasp_pose;
   Eigen::Isometry3d leader_tip_grasp_pose;
-  Eigen::Quaterniond follow_hand_start_orientation;
+  Eigen::Isometry3d leader_start_pose_tcp = leader_initial_pose_tcp;
   Eigen::Quaterniond leader_start_orientation(leader_initial_orientation);
+  leader_start_orientation.normalize();
   RCLCPP_INFO_STREAM(LOGGER, "Leader arm start orientation: " << leader_start_orientation.coeffs().transpose());
 
   // set lead final orientation
@@ -478,47 +485,75 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   RCLCPP_INFO_STREAM(LOGGER, "Leader arm grasp orientation: " << grasp_orientation.coeffs().transpose());
   // grasp's yaw and start's pitch and roll
   Eigen::Quaterniond combined_orientation = combineRotations(grasp_orientation, leader_start_orientation);
-  Eigen::Quaterniond leader_final_orientation = combined_orientation;
+  Eigen::Quaterniond leader_grasp_orientation = combined_orientation;
+  leader_grasp_orientation.normalize();
 
-//   Eigen::Quaterniond leader_final_orientation(leader_start_orientation);
-  RCLCPP_INFO_STREAM(LOGGER, "Leader arm final orientation: " << leader_final_orientation.coeffs().transpose());
+//   Eigen::Quaterniond leader_grasp_orientation(leader_start_orientation);
+  RCLCPP_INFO_STREAM(LOGGER, "Leader arm final orientation: " << leader_grasp_orientation.coeffs().transpose());
 
-  // Define the transform from the tip frame to "leader_ee_link"
-//   Eigen::Isometry3d lead_hand_frame_transform = Eigen::Isometry3d::Identity();
-//   lead_hand_frame_transform.translation().z() = -hand_to_tcp_transform_.translation().z();  // Offset along the Z-axis
+  Eigen::Isometry3d follower_start_pose;
+  tf2::fromMsg(follower_tip_path.front(), follower_start_pose);
+  Eigen::Isometry3d relative_start_transform = follower_start_pose.inverse() * leader_start_pose_tcp;
+
+  Eigen::Isometry3d follower_grasp_pose;
+  tf2::fromMsg(follower_tip_path.back(), follower_grasp_pose);
+  Eigen::Isometry3d relative_grasp_transform = follower_grasp_pose.inverse() * leader_grasp_pose_tcp;
+
+  // check if the relative transform is constant between start and grasp
+  Eigen::Isometry3d relative_transform_change = follower_start_pose.inverse() * follower_grasp_pose;
+  double position_diff = (relative_transform_change.translation() - relative_start_transform.translation()).norm();
+  Eigen::Quaterniond relative_start_rotation(Eigen::Quaterniond(relative_start_transform.rotation()));
+  Eigen::Quaterniond relative_grasp_rotation(Eigen::Quaterniond(relative_grasp_transform.rotation()));
+  relative_start_rotation.normalize();
+  relative_grasp_rotation.normalize();
+  Eigen::Quaterniond relative_rotation_diff = relative_start_rotation.conjugate() * relative_grasp_rotation;
+  double angle_diff = std::acos(relative_rotation_diff.w()) * 2.0 * 180.0 / M_PI; // in degrees 
+  RCLCPP_WARN_STREAM(LOGGER, "Difference of relative transform from start to grasp: position " << position_diff << " m, rotation " << angle_diff << " degrees");
 
   int length = follower_tip_path.size();
   for (size_t i = 0; i < length; ++i) {
     double percentage = (double)i / (double)length;
 
     const auto& pose_msg = follower_tip_path[i];
-    Eigen::Isometry3d original_pose;
-    tf2::fromMsg(pose_msg, original_pose);
+    Eigen::Isometry3d follower_pose;
+    tf2::fromMsg(pose_msg, follower_pose);
 
-    // preserve only yaw rotation
-    Eigen::Matrix3d original_rot = original_pose.rotation();
-    double original_yaw = std::atan2(original_rot(1, 0), original_rot(0, 0));  // equivalent to yaw from rotation matrix
-    Eigen::AngleAxisd yaw_rotation(original_yaw, Eigen::Vector3d::UnitZ());
-    Eigen::Quaterniond yaw_quat(yaw_rotation);
-    Eigen::Matrix3d yaw_rot_matrix = yaw_quat.toRotationMatrix();
+    // // preserve only yaw rotation (around Z axis) of the follower
+    // Eigen::Matrix3d original_rot = follower_pose.rotation();
+    // double follower_yaw = std::atan2(original_rot(1, 0), original_rot(0, 0));  // equivalent to yaw from rotation matrix
+    // Eigen::AngleAxisd yaw_rotation(follower_yaw, Eigen::Vector3d::UnitZ());
+    // Eigen::Quaterniond yaw_quat(yaw_rotation);
+    // Eigen::Matrix3d yaw_rot_matrix = yaw_quat.toRotationMatrix();
 
-    // Define the offset in the ee frame
-    Eigen::Vector3d offset_ee(track_offset, 0.0, 0.0);  // offset along the X-axis of the follower's EEF frame
-    // Transform the offset to the world frame
-    Eigen::Vector3d offset_in_world =  yaw_rot_matrix * offset_ee;
-    Eigen::Isometry3d lead_tip_pose;
-    lead_tip_pose.translation() = original_pose.translation() + offset_in_world;
+    // // Define the offset in the ee frame
+    // Eigen::Vector3d offset_ee(track_offset, 0.0, 0.0);  // offset along the X-axis of the follower's EEF frame
+    // // Transform the offset to the world frame
+    // Eigen::Vector3d offset_in_world = yaw_rot_matrix * offset_ee;
+    // Eigen::Isometry3d lead_tip_pose;
+    // lead_tip_pose.translation() = follower_pose.translation() + offset_in_world;
 
-    leader_start_orientation.normalize();
-    leader_final_orientation.normalize();
+    // leader_start_orientation.normalize();
+    // leader_grasp_orientation.normalize();
 
-    // interpolate the orientation
-    Eigen::Quaterniond interpolated_orientation = leader_start_orientation.slerp(percentage, leader_final_orientation);
-    // interpolated_orientation.normalize();
-    lead_tip_pose.linear() = interpolated_orientation.toRotationMatrix();
+    // // compute the leader orientation based on the relative rotation at the starting point
+    // Eigen::Quaterniond follower_orientation = Eigen::Quaterniond(follower_pose.rotation());
+    // Eigen::Quaterniond leader_orientation = relative_start_rotation * follower_orientation;
+    // // leader_orientation.normalize();
+    // lead_tip_pose.linear() = leader_orientation.toRotationMatrix();
 
-    // pose at hand
-    // Eigen::Isometry3d lead_hand_pose = lead_tip_pose*lead_hand_frame_transform;
+    // // interpolate the orientation
+    // // Eigen::Quaterniond interpolated_orientation = leader_start_orientation.slerp(percentage, leader_grasp_orientation);
+    // // // interpolated_orientation.normalize();
+    // // lead_tip_pose.linear() = interpolated_orientation.toRotationMatrix();
+
+    // // pose at hand
+    // // Eigen::Isometry3d lead_hand_pose = lead_tip_pose*lead_hand_frame_transform;
+
+    Eigen::Isometry3d transformation_follower_to_leader = Eigen::Isometry3d::Identity();
+    transformation_follower_to_leader.translation() = Eigen::Vector3d(track_offset, 0.0, 0.0);  // along follower +X
+    transformation_follower_to_leader.linear()      = relative_start_rotation.toRotationMatrix(); // relative rotation from follower to leader at the starting point
+
+    Eigen::Isometry3d lead_tip_pose = follower_pose * relative_start_transform;                        // full rigid composition 
 
     geometry_msgs::msg::Pose lead_tip_pose_msg;
     tf2::convert(lead_tip_pose, lead_tip_pose_msg);
@@ -602,13 +637,13 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   }
 
   // set tip_link to get cumulative arc length
-  if (!leader_track_trajectory->setTipLink("right_panda_hand", "right_panda_link0", lead_flange_to_tcp_transform_, 0.00)) {
+  if (!leader_track_trajectory->setTipLink("right_panda_link0", lead_flange_to_tcp_transform_, 0.00)) {
     return_message = "Failed to set tip link for leader trajectory.";
     RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
     return false;
   }
 
-  if (!follower_track_trajectory->setTipLink("left_panda_hand", "left_panda_link0", follow_flange_to_tcp_transform_, 0.00)) {
+  if (!follower_track_trajectory->setTipLink("left_panda_link0", follow_flange_to_tcp_transform_, 0.00)) {
     return_message = "Failed to set tip link for follower trajectory.";
     RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
     return false;
@@ -635,6 +670,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     original_pose.translation().z() -= 1.025;
 
     Eigen::Isometry3d desired_leader_tip_pose_in_base = original_pose * Eigen::Isometry3d::Identity(); // desired is the original pose
+    RCLCPP_INFO_STREAM(LOGGER, "Desired leader tip pose at index " << i << ": " << desired_leader_tip_pose_in_base.translation().transpose());
 
     double position_error_tolerance = 0.001; // 1cm tolerance
     std::vector<std::pair<size_t, Eigen::Isometry3d>> best_position_candidates;
@@ -643,14 +679,12 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     size_t best_j = j_start;
 
     for (size_t j = j_start; j < leader_track_trajectory->getWayPointCount(); ++j) {
-      const moveit::core::RobotState& leader_state = leader_track_trajectory->getWayPoint(j);
-      Eigen::Isometry3d leader_ee_pose_in_world = leader_state.getGlobalLinkTransform("right_panda_hand");
-      Eigen::Isometry3d leader_ee_pose_in_base = robot_base_pose.inverse() * leader_ee_pose_in_world;
-      Eigen::Isometry3d leader_tip_pose_in_base = leader_ee_pose_in_base * lead_flange_to_tcp_transform_;
+      Eigen::Isometry3d leader_tip_pose_in_base = leader_track_trajectory->getWayPointPose(j);
+      Eigen::Vector3d leader_tip_position_in_base = leader_track_trajectory->getWayPointPosition(j);
 
       // check position alignment
-      double position_err = (leader_tip_pose_in_base.translation() - desired_leader_tip_pose_in_base.translation()).norm();
-      // RCLCPP_INFO_STREAM(LOGGER, "Checking position alignment for waypoint " << i << " at index " << j << " with position error: " << position_err);
+      double position_err = (leader_tip_position_in_base - desired_leader_tip_pose_in_base.translation()).norm();
+      RCLCPP_INFO_STREAM(LOGGER, "Position at index " << j << " is " << leader_tip_position_in_base.transpose() << " with position error: " << position_err);
       if (position_err < best_position_error) {
         best_position_error = position_err;
       }
@@ -1384,8 +1418,13 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
     for (const auto& pair: planner_) {
       if (pair.first == props.get<std::string>("follow_group")) {
         // Plan trajectory
+
+        // add orientation constraint
+        std::string constraint_link = "left_panda_hand";
+        auto constraint = setOrientationConstraint(start_state, constraint_link);
+
         auto result_1 = pair.second->plan(start_with_cable, grasp_with_cable, follow_jmg_, 
-                                        props.get<double>("timeout"), traj_ompl_1, follow_path_constraints);
+                                        props.get<double>("timeout"), traj_ompl_1); // constraint); // follow_path_constraints
         // auto result_1 = pair.second->plan(start_with_cable, *eef_link, offset, target_pose, follow_jmg_,
         //                                 props.get<double>("timeout"), traj_ompl_1);
         if (!result_1) {
@@ -1537,7 +1576,7 @@ double ConnectMFReverse::FirstArmFollow(planning_scene::PlanningScenePtr& interm
   std::cout<<"leader arm tip path has " << leader_tip_path.size() << " waypoints." << std::endl;
 
   // TODO@KejiaChen: set time_parameterization to false will lead to problems
-  double fraction_lead = move_group_lead_->computeCartesianPath(leader_tip_path, 0.0001, 3.0, lead_trajectory_msg, true,
+  double fraction_lead = move_group_lead_->computeCartesianPath(leader_tip_path, 0.001, 0.0, lead_trajectory_msg, true,
                                                                     nullptr, lead_flange_to_tcp_transform, true);
   // leader_cartesian_planner_.plan(lead_scene, leader_jmg_->getLinkModel("left_panda_hand"),
   //                                lead_grasp_frame_transform, 
@@ -1554,7 +1593,7 @@ double ConnectMFReverse::FirstArmFollow(planning_scene::PlanningScenePtr& interm
 }
 
 SubTrajectoryPtr ConnectMFReverse::mergeIgnoreCollision(const std::vector<PlannerIdTrajectoryPair>& sub_trajectories,
-                                  // const std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes, // unused
+                                  const planning_scene::PlanningSceneConstPtr& intermediate_scene,
                                   const moveit::core::RobotState& state) {
 	// no need to merge if there is only a single sub trajectory
 	if (sub_trajectories.size() == 1)
@@ -1583,12 +1622,11 @@ SubTrajectoryPtr ConnectMFReverse::mergeIgnoreCollision(const std::vector<Planne
 		return SubTrajectoryPtr();
 	}
 
-	// // check merged trajectory for collisions
-	// if (!intermediate_scenes.front()->isPathValid(*trajectory,
-	//                                               properties().get<moveit_msgs::msg::Constraints>("path_constraints"))){
-	// 	RCLCPP_INFO(LOGGER, "Collision detected in merged trajectory");
-	// 	return SubTrajectoryPtr();
-	// }
+	// check merged trajectory for collisions
+	if (!intermediate_scene->isPathValid(*trajectory, properties().get<moveit_msgs::msg::Constraints>("path_constraints"))){
+		RCLCPP_INFO(LOGGER, "Collision detected in merged trajectory");
+		return SubTrajectoryPtr();
+	}
 
 	return std::make_shared<SubTrajectory>(trajectory, 0.0, std::string(""), planner_ids);
 }
