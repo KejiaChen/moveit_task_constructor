@@ -41,6 +41,7 @@
 #include <moveit/task_constructor/storage.h>
 #include <moveit/task_constructor/utils.h>
 #include <moveit_msgs/msg/robot_state.h>
+#include <geometry_msgs/msg/vector3_stamped.hpp>
 
 namespace moveit {
 namespace task_constructor {
@@ -188,6 +189,37 @@ public:
 
 	using TrajectoryCostTerm::operator();
 	double operator()(const SubTrajectory& s, std::string& comment) const override;
+};
+
+/* Manipulability in a specific direction */
+class DirectionalManipulability: public TrajectoryCostTerm
+{
+public:
+  enum class Space { TRANSLATION, ROTATION };
+  /// direction_vec is expressed in direction_frame. If direction_frame=="world" it's used as-is.
+  DirectionalManipulability(
+	std::map<std::string, std::string> group_ee,
+	geometry_msgs::msg::Vector3Stamped direction_vec,
+	Space space = Space::TRANSLATION,                              // TRANSLATION or ROTATION
+	std::map<std::string,double> group_weights = std::map<std::string,double>(), // group-name -> weight (optional)
+	double epsilon=1e-6,
+	Mode mode=Mode::AUTO);
+
+  using TrajectoryCostTerm::operator();
+  double operator()(const SubTrajectory& s, std::string& comment) const override;
+
+private:																		
+	double evalState(const moveit::core::RobotState& state_in, const Eigen::Vector3d& u_world) const;
+
+  std::map<std::string, std::string> group_ee_; // group-name -> end-effector link name
+  geometry_msgs::msg::Vector3Stamped direction_vec_; // direction in which manipulability is evaluated
+  std::string dir_frame_; // frame in which direction_vec is expressed
+  Eigen::Vector3d dir_local_;
+  Space space_;
+  std::map<std::string,double> group_weights_; // group-name -> weight
+  double eps_;
+  Mode  mode_;
+
 };
 
 /** inverse distance to collision

@@ -194,6 +194,116 @@ double DistanceToReference::operator()(const SubTrajectory& s, std::string& /*co
 	}
 }
 
+DirectionalManipulability::DirectionalManipulability(
+      std::map<std::string, std::string> group_ee,
+      geometry_msgs::msg::Vector3Stamped direction_vec,
+      Space space,                              // TRANSLATION or ROTATION
+      std::map<std::string,double> group_weights, // group-name -> weight (optional)
+      double epsilon,
+      Mode mode)
+    : group_ee_(std::move(group_ee))
+	, direction_vec_(std::move(direction_vec))
+	, dir_frame_(direction_vec_.header.frame_id)
+    , space_(space)
+    , group_weights_(std::move(group_weights))
+    , eps_(epsilon)
+    , mode_(mode) {	
+		dir_local_ = Eigen::Vector3d(direction_vec_.vector.x, direction_vec_.vector.y, direction_vec_.vector.z);
+	}
+
+double DirectionalManipulability::operator()(const moveit::task_constructor::SubTrajectory& s, std::string& comment) const {
+    const auto& traj  = s.trajectory();
+    const auto& state = (mode_ == Mode::END_INTERFACE) ? s.end() : s.start();
+    if (!state || !state->scene()){
+		comment = "DirectionalManipulability: no valid state";
+		return std::numeric_limits<double>::infinity();
+	}
+
+	Eigen::Vector3d u_world = dir_local_;
+	if (dir_frame_ != "world" && dir_frame_ != "base") {
+		const auto& scene = state->scene();
+		if (!scene->knowsFrameTransform(dir_frame_)) {
+		comment = "unknown direction_frame: " + dir_frame_;
+		return std::numeric_limits<double>::infinity();
+		}
+		u_world = scene->getFrameTransform(dir_frame_).linear() * u_world;
+	}
+	u_world.normalize();
+
+    if (mode_ == Mode::START_INTERFACE || mode_ == Mode::END_INTERFACE || (mode_ == Mode::AUTO && !traj)) {
+      comment = "1/mean_lin_manip";
+	  double m = evalState(state->scene()->getCurrentState(), u_world);
+	  comment += " = " + std::to_string(m);
+      return m;
+    }
+
+    if (traj->getWayPointCount() == 0) return 0.0;
+
+    // Average the per-waypoint cost (1 / weighted_mean(m_dir)) over the trajectory
+    double acc_cost = 0.0;
+    for (size_t i = 0; i < traj->getWayPointCount(); ++i)
+      acc_cost += evalState(traj->getWayPoint(i), u_world);
+    comment = "1/mean_ang_manip";
+	double m = acc_cost / static_cast<double>(traj->getWayPointCount());
+	comment += " = " + std::to_string(m);
+    return m;
+  }
+
+  // Evaluate cost at a single robot state.
+  // Steps:
+  //   1) resolve direction to world/base
+  //   2) for each (group, ee):
+  //        - compute 6xN Jacobian, take linear (top 3 rows) or angular (bottom 3)
+  //        - m_dir = sqrt( u^T (Js Js^T) u )
+  //   3) weighted mean of m_dir across groups
+  //   4) cost = 1 / max(mean_m, eps)
+  double DirectionalManipulability::evalState(const moveit::core::RobotState& state_in, const Eigen::Vector3d& u_world) const {
+    moveit::core::RobotState state = state_in;
+
+    // 2) Accumulate weighted manipulability over groups
+    double wsum = 0.0;
+    double msum = 0.0;
+    size_t used = 0;
+
+    for (const auto& item : group_ee_) {
+	  const std::string& group = item.first;
+	  const std::string& ee    = item.second;
+      const auto* jmg  = state.getJointModelGroup(group);
+      const auto* link = state.getLinkModel(ee);
+      if (!jmg || !link) continue;
+
+      // group weight
+      double w = 1.0;
+      if (!group_weights_.empty()) {
+        auto it = group_weights_.find(group);
+        w = (it != group_weights_.end()) ? it->second : 0.0;  // unspecified groups ignored when map provided
+      }
+      if (w == 0.0) continue;
+
+      // Jacobian at EE origin (set a non-zero reference point if you need a TCP offset)
+      Eigen::MatrixXd J; // 6 x N
+      state.getJacobian(jmg, link, Eigen::Vector3d::Zero(), J);
+      const Eigen::MatrixXd Js = (space_ == Space::TRANSLATION) ? J.topRows(3) : J.bottomRows(3);
+
+      // m_dir = sqrt( u^T (Js Js^T) u )
+      const Eigen::Matrix3d JJt = Js * Js.transpose();
+      const double m2 = (u_world.transpose() * JJt * u_world).value();
+      const double m  = std::sqrt(std::max(0.0, m2));
+
+      if (m > 0.0) {
+        msum += w * m;
+        wsum += w;
+        ++used;
+      }
+    }
+
+    if (used == 0 || wsum == 0.0) return std::numeric_limits<double>::infinity();
+
+    const double m_mean = msum / wsum;
+    return 1.0 / std::max(m_mean, eps_);
+}
+
+
 double TrajectoryDuration::operator()(const SubTrajectory& s, std::string& /*comment*/) const {
 	return s.trajectory() ? s.trajectory()->getDuration() : 0.0;
 }
