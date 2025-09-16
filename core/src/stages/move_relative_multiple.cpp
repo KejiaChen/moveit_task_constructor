@@ -279,210 +279,210 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			RCLCPP_INFO_STREAM(LOGGER, pair.first);
 		}
 
-	for (const GroupPlannerVector::value_type& pair : planner_variant) {	
-		std::string group = pair.first;
-		RCLCPP_INFO_STREAM(LOGGER, "Planning for group: " << group);
-		
-		jmg = robot_model->getJointModelGroup(group);
-		if (!jmg) {
-			solution.markAsFailure("invalid joint model group: " + group);
-			return false;
-		}
-	
-        robot_trajectory::RobotTrajectoryPtr robot_trajectory;
-        bool success = false;
-        std::string comment = "";
-
-		// check if we have a joint-space target
-		if (getJointStateFromOffset(direction, dir, jmg, scene->getCurrentStateNonConst())) {
-			// plan to joint-space target
-			auto result = pair.second->plan(scene, scene, jmg, timeout, robot_trajectory, path_constraints);
-			success = bool(result);
-			if (!success)
-				comment = result.message;
-			solution.setPlannerId(pair.second->getPlannerId());
-		} else {
-			RCLCPP_INFO_STREAM(LOGGER, "Cartesian target");
-			// Cartesian targets require an IK reference frame
-			const moveit::core::LinkModel* link;
-			std::string error_msg;
-			Eigen::Isometry3d ik_pose_world;
-
-			geometry_msgs::msg::PoseStamped ik_frame = ik_frames[group];
-			Property ik_frame_property;
-			ik_frame_property.setValue(ik_frame);
-			if (!utils::getRobotTipForFrame(ik_frame_property, *scene, jmg, error_msg, link, ik_pose_world)) {
-				solution.markAsFailure(error_msg);
-				return false;
-			}
-
-			bool use_rotation_distance = false;  // measure achieved distance as rotation?
-			Eigen::Vector3d linear;  // linear translation
-			Eigen::Vector3d angular;  // angular rotation
-			double linear_norm = 0.0, angular_norm = 0.0;
-			Eigen::Isometry3d target_eigen;
-
-			try {  // try to extract Twist
-				RCLCPP_INFO_STREAM(LOGGER, "Try to extract Twist");
-				const geometry_msgs::msg::TwistStamped& target = boost::any_cast<geometry_msgs::msg::TwistStamped>(direction);
-				const Eigen::Isometry3d& frame_pose = scene->getFrameTransform(target.header.frame_id);
-				tf2::fromMsg(target.twist.linear, linear);
-				tf2::fromMsg(target.twist.angular, angular);
-
-				linear_norm = linear.norm();
-				angular_norm = angular.norm();
-				if (angular_norm > std::numeric_limits<double>::epsilon())
-					angular /= angular_norm;  // normalize angular
-				use_rotation_distance = linear_norm < std::numeric_limits<double>::epsilon();
-
-				// use max distance?
-				if (max_distance > 0.0) {
-					double scale = 1.0;
-					if (!use_rotation_distance)  // non-zero linear motion defines distance
-						scale = max_distance / linear_norm;
-					else if (angular_norm > std::numeric_limits<double>::epsilon())
-						scale = max_distance / angular_norm;
-					else
-						assert(false);
-					linear *= scale;
-					linear_norm *= scale;
-					angular_norm *= scale;
-				}
-
-				// invert direction?
-				if (dir == Interface::BACKWARD) {
-					linear *= -1.0;
-					angular *= -1.0;
-				}
-
-				// compute target transform for ik_frame applying motion transform of twist
-				// linear+angular are expressed w.r.t. model frame and thus we need left-multiplication
-				linear = frame_pose.linear() * linear;
-				angular = frame_pose.linear() * angular;
-				auto R = Eigen::AngleAxisd(angular_norm, angular);  // NOLINT(readability-identifier-naming)
-				auto p = ik_pose_world.translation();
-				target_eigen = Eigen::Translation3d(linear + p - R * p) * (R * ik_pose_world);
-				goto COMPUTE;
-			} catch (const boost::bad_any_cast&) { /* continue with Vector */
-			}
-
-			try {  // try to extract Vector
-				RCLCPP_INFO_STREAM(LOGGER, "Try to extract Vector");
-				const geometry_msgs::msg::Vector3Stamped& target =
-					boost::any_cast<geometry_msgs::msg::Vector3Stamped>(direction);
-				const Eigen::Isometry3d& frame_pose = scene->getFrameTransform(target.header.frame_id);
-				tf2::fromMsg(target.vector, linear);
-
-				// use max distance?
-				if (max_distance > 0.0) {
-					linear.normalize();
-					linear *= max_distance;
-				}
-				linear_norm = linear.norm();
-
-				// invert direction?
-				if (dir == Interface::BACKWARD)
-					linear *= -1.0;
-
-				// compute target transform for ik_frame applying delta transform of twist
-				linear = frame_pose.linear() * linear;
-				target_eigen = Eigen::Translation3d(linear) * ik_pose_world;
-			} catch (const boost::bad_any_cast&) {
-				solution.markAsFailure(std::string("invalid direction type: ") + direction.type().name());
-				return false;
-			}
-
-		COMPUTE:
-		{
-			// offset from link to ik_frame
-			const Eigen::Isometry3d& offset = scene->getCurrentState().getGlobalLinkTransform(link).inverse() * ik_pose_world;
-
-			auto result =
-				pair.second->plan(scene, *link, offset, target_eigen, jmg, timeout, robot_trajectory, path_constraints);
-			RCLCPP_INFO_STREAM(LOGGER, "Planning result: " << std::boolalpha << bool(result));
-			success = bool(result);
-			if (!success){
-				comment = result.message;
-				RCLCPP_INFO_STREAM(LOGGER, "Planning failed for group " << group << ": " << comment);
-				// break;
-			}else{
-			solution.setPlannerId(pair.second->getPlannerId());
-			if (robot_trajectory && robot_trajectory->getWayPointCount() > 0) {  // the following requires a robot_trajectory
-																				// returned from planning
-				moveit::core::RobotStatePtr& reached_state = robot_trajectory->getLastWayPointPtr();
-				reached_state->updateLinkTransforms();
-				const Eigen::Isometry3d& reached_pose = reached_state->getGlobalLinkTransform(link) * offset;
-
-				double distance = 0.0;
-				if (use_rotation_distance) {
-					Eigen::AngleAxisd rotation(reached_pose.linear() * ik_pose_world.linear().transpose());
-					distance = rotation.angle();
-				} else
-					distance = (reached_pose.translation() - ik_pose_world.translation()).norm();
-
-				// min_distance reached?
-				if (min_distance > 0.0) {
-					success = distance >= min_distance;
-					if (!success) {
-						char msg[100];
-						snprintf(msg, sizeof(msg), "min_distance not reached (%.3g < %.3g)", distance, min_distance);
-						// solution.setComment(msg);
-						comment = msg;
-						// break; // Don't break, but continue for twist or other types of commands
-				} else if (min_distance == 0.0) {  // if min_distance is zero, we succeed in any case
-					success = true;
-				} else if (!success){
-					// solution.setComment("failed to move full distance");
-					comment = "failed to move full distance";
-					// break;
-				}
-
-				// visualize plan
-				auto ns = props.get<std::string>("marker_ns");
-				if (!ns.empty() && linear_norm > 0) {  // ensures that 'distance' is the norm of the reached distance
-					visualizePlan(solution.markers(), dir, success, ns, scene->getPlanningFrame(), ik_pose_world, reached_pose,
-								linear, distance);
-				}
-				}
-			}
-			}
-		} // COMPUTE block ends here
-
-		if (!success) {
-			overall_success = false;
-			RCLCPP_INFO_STREAM(LOGGER, "Planning for this variant failed");
-			// overall_comment += "Failed to plan for group " + group + ": " + comment + "\n";
-			// break;
-		}
-		}
-
-		// store result
-		if (robot_trajectory && robot_trajectory->getWayPointCount() > 0) {
-			// scene->setCurrentState(robot_trajectory->getLastWayPoint());
-			std::vector<double> positions;
-			const moveit::core::RobotStatePtr& final_waypoint = robot_trajectory->getLastWayPointPtr();
-			const moveit::core::JointModelGroup* final_jmg = final_waypoint->getJointModelGroup(pair.first);
-			final_waypoint->copyJointGroupPositions(final_jmg, positions);
-			temp_state.setJointGroupPositions(final_jmg, positions);
-			temp_state.update();
-
-			// scene->setCurrentState(robot_trajectory->getLastWayPoint());
-			scene->setCurrentState(temp_state);
-			scene->getCurrentStateNonConst().update();
-
-			if (dir == Interface::BACKWARD)
-				robot_trajectory->reverse();
+		for (const GroupPlannerVector::value_type& pair : planner_variant) {	
+			std::string group = pair.first;
+			RCLCPP_INFO_STREAM(LOGGER, "Planning for group: " << group);
 			
-			RCLCPP_INFO_STREAM(LOGGER, "Trajectory for group " << group << " has " << robot_trajectory->getWayPointCount() << " waypoints.");
-			overall_trajectories.push_back({ pair.second->getPlannerId(), robot_trajectory });
-		// 	solution.setTrajectory(robot_trajectory);
+			jmg = robot_model->getJointModelGroup(group);
+			if (!jmg) {
+				solution.markAsFailure("invalid joint model group: " + group);
+				return false;
+			}
+		
+			robot_trajectory::RobotTrajectoryPtr robot_trajectory;
+			bool success = false;
+			std::string comment = "";
 
-		// 	if (!success)
-		// 		solution.markAsFailure(comment);
-		// 	return true;
+			// check if we have a joint-space target
+			if (getJointStateFromOffset(direction, dir, jmg, scene->getCurrentStateNonConst())) {
+				// plan to joint-space target
+				auto result = pair.second->plan(scene, scene, jmg, timeout, robot_trajectory, path_constraints);
+				success = bool(result);
+				if (!success)
+					comment = result.message;
+				solution.setPlannerId(pair.second->getPlannerId());
+			} else {
+				RCLCPP_INFO_STREAM(LOGGER, "Cartesian target");
+				// Cartesian targets require an IK reference frame
+				const moveit::core::LinkModel* link;
+				std::string error_msg;
+				Eigen::Isometry3d ik_pose_world;
+
+				geometry_msgs::msg::PoseStamped ik_frame = ik_frames[group];
+				Property ik_frame_property;
+				ik_frame_property.setValue(ik_frame);
+				if (!utils::getRobotTipForFrame(ik_frame_property, *scene, jmg, error_msg, link, ik_pose_world)) {
+					solution.markAsFailure(error_msg);
+					return false;
+				}
+
+				bool use_rotation_distance = false;  // measure achieved distance as rotation?
+				Eigen::Vector3d linear;  // linear translation
+				Eigen::Vector3d angular;  // angular rotation
+				double linear_norm = 0.0, angular_norm = 0.0;
+				Eigen::Isometry3d target_eigen;
+
+				try {  // try to extract Twist
+					RCLCPP_INFO_STREAM(LOGGER, "Try to extract Twist");
+					const geometry_msgs::msg::TwistStamped& target = boost::any_cast<geometry_msgs::msg::TwistStamped>(direction);
+					const Eigen::Isometry3d& frame_pose = scene->getFrameTransform(target.header.frame_id);
+					tf2::fromMsg(target.twist.linear, linear);
+					tf2::fromMsg(target.twist.angular, angular);
+
+					linear_norm = linear.norm();
+					angular_norm = angular.norm();
+					if (angular_norm > std::numeric_limits<double>::epsilon())
+						angular /= angular_norm;  // normalize angular
+					use_rotation_distance = linear_norm < std::numeric_limits<double>::epsilon();
+
+					// use max distance?
+					if (max_distance > 0.0) {
+						double scale = 1.0;
+						if (!use_rotation_distance)  // non-zero linear motion defines distance
+							scale = max_distance / linear_norm;
+						else if (angular_norm > std::numeric_limits<double>::epsilon())
+							scale = max_distance / angular_norm;
+						else
+							assert(false);
+						linear *= scale;
+						linear_norm *= scale;
+						angular_norm *= scale;
+					}
+
+					// invert direction?
+					if (dir == Interface::BACKWARD) {
+						linear *= -1.0;
+						angular *= -1.0;
+					}
+
+					// compute target transform for ik_frame applying motion transform of twist
+					// linear+angular are expressed w.r.t. model frame and thus we need left-multiplication
+					linear = frame_pose.linear() * linear;
+					angular = frame_pose.linear() * angular;
+					auto R = Eigen::AngleAxisd(angular_norm, angular);  // NOLINT(readability-identifier-naming)
+					auto p = ik_pose_world.translation();
+					target_eigen = Eigen::Translation3d(linear + p - R * p) * (R * ik_pose_world);
+					goto COMPUTE;
+				} catch (const boost::bad_any_cast&) { /* continue with Vector */
+				}
+
+				try {  // try to extract Vector
+					RCLCPP_INFO_STREAM(LOGGER, "Try to extract Vector");
+					const geometry_msgs::msg::Vector3Stamped& target =
+						boost::any_cast<geometry_msgs::msg::Vector3Stamped>(direction);
+					const Eigen::Isometry3d& frame_pose = scene->getFrameTransform(target.header.frame_id);
+					tf2::fromMsg(target.vector, linear);
+
+					// use max distance?
+					if (max_distance > 0.0) {
+						linear.normalize();
+						linear *= max_distance;
+					}
+					linear_norm = linear.norm();
+
+					// invert direction?
+					if (dir == Interface::BACKWARD)
+						linear *= -1.0;
+
+					// compute target transform for ik_frame applying delta transform of twist
+					linear = frame_pose.linear() * linear;
+					target_eigen = Eigen::Translation3d(linear) * ik_pose_world;
+				} catch (const boost::bad_any_cast&) {
+					solution.markAsFailure(std::string("invalid direction type: ") + direction.type().name());
+					return false;
+				}
+
+			COMPUTE:
+			{
+				// offset from link to ik_frame
+				const Eigen::Isometry3d& offset = scene->getCurrentState().getGlobalLinkTransform(link).inverse() * ik_pose_world;
+
+				auto result =
+					pair.second->plan(scene, *link, offset, target_eigen, jmg, timeout, robot_trajectory, path_constraints);
+				RCLCPP_INFO_STREAM(LOGGER, "Planning result: " << std::boolalpha << bool(result));
+				success = bool(result);
+				if (!success){
+					comment = result.message;
+					RCLCPP_INFO_STREAM(LOGGER, "Planning failed for group " << group << ": " << comment);
+					// break;
+				}else{
+				solution.setPlannerId(pair.second->getPlannerId());
+				if (robot_trajectory && robot_trajectory->getWayPointCount() > 0) {  // the following requires a robot_trajectory
+																					// returned from planning
+					moveit::core::RobotStatePtr& reached_state = robot_trajectory->getLastWayPointPtr();
+					reached_state->updateLinkTransforms();
+					const Eigen::Isometry3d& reached_pose = reached_state->getGlobalLinkTransform(link) * offset;
+
+					double distance = 0.0;
+					if (use_rotation_distance) {
+						Eigen::AngleAxisd rotation(reached_pose.linear() * ik_pose_world.linear().transpose());
+						distance = rotation.angle();
+					} else
+						distance = (reached_pose.translation() - ik_pose_world.translation()).norm();
+
+					// min_distance reached?
+					if (min_distance > 0.0) {
+						success = distance >= min_distance;
+						if (!success) {
+							char msg[100];
+							snprintf(msg, sizeof(msg), "min_distance not reached (%.3g < %.3g)", distance, min_distance);
+							// solution.setComment(msg);
+							comment = msg;
+							// break; // Don't break, but continue for twist or other types of commands
+					} else if (min_distance == 0.0) {  // if min_distance is zero, we succeed in any case
+						success = true;
+					} else if (!success){
+						// solution.setComment("failed to move full distance");
+						comment = "failed to move full distance";
+						// break;
+					}
+
+					// visualize plan
+					auto ns = props.get<std::string>("marker_ns");
+					if (!ns.empty() && linear_norm > 0) {  // ensures that 'distance' is the norm of the reached distance
+						visualizePlan(solution.markers(), dir, success, ns, scene->getPlanningFrame(), ik_pose_world, reached_pose,
+									linear, distance);
+					}
+					}
+				}
+				}
+			} // COMPUTE block ends here
+
+			if (!success) {
+				overall_success = false;
+				RCLCPP_INFO_STREAM(LOGGER, "Planning for this variant failed");
+				// overall_comment += "Failed to plan for group " + group + ": " + comment + "\n";
+				// break;
+			}
+			}
+
+			// store result
+			if (robot_trajectory && robot_trajectory->getWayPointCount() > 0) {
+				// scene->setCurrentState(robot_trajectory->getLastWayPoint());
+				std::vector<double> positions;
+				const moveit::core::RobotStatePtr& final_waypoint = robot_trajectory->getLastWayPointPtr();
+				const moveit::core::JointModelGroup* final_jmg = final_waypoint->getJointModelGroup(pair.first);
+				final_waypoint->copyJointGroupPositions(final_jmg, positions);
+				temp_state.setJointGroupPositions(final_jmg, positions);
+				temp_state.update();
+
+				// scene->setCurrentState(robot_trajectory->getLastWayPoint());
+				scene->setCurrentState(temp_state);
+				scene->getCurrentStateNonConst().update();
+
+				if (dir == Interface::BACKWARD)
+					robot_trajectory->reverse();
+				
+				RCLCPP_INFO_STREAM(LOGGER, "Trajectory for group " << group << " has " << robot_trajectory->getWayPointCount() << " waypoints.");
+				overall_trajectories.push_back({ pair.second->getPlannerId(), robot_trajectory });
+			// 	solution.setTrajectory(robot_trajectory);
+
+			// 	if (!success)
+			// 		solution.markAsFailure(comment);
+			// 	return true;
+			}
 		}
-	}
-	// loop for single arm ends here
+		// loop for single arm ends here
 
 	RCLCPP_INFO_STREAM(LOGGER, "Final value of overall_success for this variant: " << std::boolalpha << overall_success);
 	if (overall_success) {
