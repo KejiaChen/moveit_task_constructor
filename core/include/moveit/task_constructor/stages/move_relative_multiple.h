@@ -56,6 +56,7 @@ namespace stages {
 /** Perform a Cartesian motion relative to some link */
 using GroupPoseDict = std::map<std::string, geometry_msgs::msg::PoseStamped>;
 using GroupStringDict = std::map<std::string, std::string>;
+using GroupDistanceDict = std::map<std::string, double>;
 class MoveRelativeMultiple : public PropagatingEitherWay
 {
 public:
@@ -113,6 +114,7 @@ protected:
 
 protected:
 	GroupPlannerVector planner_;
+	GroupDistanceDict reached_distances_;
 	moveit::core::JointModelGroupPtr merged_jmg_;
 };
 }  // namespace stages
