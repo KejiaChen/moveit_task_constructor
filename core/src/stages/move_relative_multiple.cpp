@@ -290,15 +290,15 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 			}
 		
 			robot_trajectory::RobotTrajectoryPtr robot_trajectory;
-			bool success = false;
+			bool single_arm_success = false;
 			std::string comment = "";
 
 			// check if we have a joint-space target
 			if (getJointStateFromOffset(direction, dir, jmg, scene->getCurrentStateNonConst())) {
 				// plan to joint-space target
 				auto result = pair.second->plan(scene, scene, jmg, timeout, robot_trajectory, path_constraints);
-				success = bool(result);
-				if (!success)
+				single_arm_success = bool(result);
+				if (!single_arm_success)
 					comment = result.message;
 				solution.setPlannerId(pair.second->getPlannerId());
 			} else {
@@ -335,7 +335,7 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 						angular /= angular_norm;  // normalize angular
 					use_rotation_distance = linear_norm < std::numeric_limits<double>::epsilon();
 
-					// use max distance?
+					// scale to max_distance
 					if (max_distance > 0.0) {
 						double scale = 1.0;
 						if (!use_rotation_distance)  // non-zero linear motion defines distance
@@ -392,68 +392,85 @@ bool MoveRelativeMultiple::compute(const InterfaceState& state, planning_scene::
 					return false;
 				}
 
-			COMPUTE:
-			{
-				// offset from link to ik_frame
-				const Eigen::Isometry3d& offset = scene->getCurrentState().getGlobalLinkTransform(link).inverse() * ik_pose_world;
+				COMPUTE:
+				{
+					// offset from link to ik_frame
+					const Eigen::Isometry3d& offset = scene->getCurrentState().getGlobalLinkTransform(link).inverse() * ik_pose_world;
 
-				auto result =
-					pair.second->plan(scene, *link, offset, target_eigen, jmg, timeout, robot_trajectory, path_constraints);
-				RCLCPP_INFO_STREAM(LOGGER, "Planning result: " << std::boolalpha << bool(result));
-				success = bool(result);
-				if (!success){
-					comment = result.message;
-					RCLCPP_INFO_STREAM(LOGGER, "Planning failed for group " << group << ": " << comment);
-					// break;
-				}else{
-				solution.setPlannerId(pair.second->getPlannerId());
-				if (robot_trajectory && robot_trajectory->getWayPointCount() > 0) {  // the following requires a robot_trajectory
-																					// returned from planning
-					moveit::core::RobotStatePtr& reached_state = robot_trajectory->getLastWayPointPtr();
-					reached_state->updateLinkTransforms();
-					const Eigen::Isometry3d& reached_pose = reached_state->getGlobalLinkTransform(link) * offset;
-
-					double distance = 0.0;
-					if (use_rotation_distance) {
-						Eigen::AngleAxisd rotation(reached_pose.linear() * ik_pose_world.linear().transpose());
-						distance = rotation.angle();
-					} else
-						distance = (reached_pose.translation() - ik_pose_world.translation()).norm();
-
-					// min_distance reached?
-					if (min_distance > 0.0) {
-						success = distance >= min_distance;
-						if (!success) {
-							char msg[100];
-							snprintf(msg, sizeof(msg), "min_distance not reached (%.3g < %.3g)", distance, min_distance);
-							// solution.setComment(msg);
-							comment = msg;
-							// break; // Don't break, but continue for twist or other types of commands
-					} else if (min_distance == 0.0) {  // if min_distance is zero, we succeed in any case
-						success = true;
-					} else if (!success){
-						// solution.setComment("failed to move full distance");
-						comment = "failed to move full distance";
+					auto result = pair.second->plan(scene, *link, offset, target_eigen, jmg, timeout, robot_trajectory, path_constraints);
+					RCLCPP_INFO_STREAM(LOGGER, "Planning result: " << std::boolalpha << bool(result));
+					single_arm_success = bool(result);
+					if (!single_arm_success){
+						comment = result.message;
+						RCLCPP_INFO_STREAM(LOGGER, "Planning failed for group " << group << ": " << comment);
 						// break;
-					}
+					}else{
+						solution.setPlannerId(pair.second->getPlannerId());
+						if (robot_trajectory && robot_trajectory->getWayPointCount() > 0) {  // the following requires a robot_trajectory
+																							// returned from planning
+							moveit::core::RobotStatePtr& reached_state = robot_trajectory->getLastWayPointPtr();
+							reached_state->updateLinkTransforms();
+							const Eigen::Isometry3d& reached_pose = reached_state->getGlobalLinkTransform(link) * offset;
 
-					// visualize plan
-					auto ns = props.get<std::string>("marker_ns");
-					if (!ns.empty() && linear_norm > 0) {  // ensures that 'distance' is the norm of the reached distance
-						visualizePlan(solution.markers(), dir, success, ns, scene->getPlanningFrame(), ik_pose_world, reached_pose,
-									linear, distance);
-					}
-					}
-				}
-				}
-			} // COMPUTE block ends here
+							reached_distances_[group] = 0.0;  // default: 0.0 distance reached
+							if (use_rotation_distance) {
+								Eigen::AngleAxisd rotation(reached_pose.linear() * ik_pose_world.linear().transpose());
+								reached_distances_[group] = rotation.angle();
+							} else
+								reached_distances_[group] = (reached_pose.translation() - ik_pose_world.translation()).norm();
 
-			if (!success) {
-				overall_success = false;
-				RCLCPP_INFO_STREAM(LOGGER, "Planning for this variant failed");
-				// overall_comment += "Failed to plan for group " + group + ": " + comment + "\n";
-				// break;
+							// min_distance reached?
+							if (min_distance > 0.0) {
+								single_arm_success = reached_distances_[group] >= min_distance;
+								if (!single_arm_success) {
+									char msg[100];
+									snprintf(msg, sizeof(msg), "min_distance not reached (%.3g < %.3g)", reached_distances_[group], min_distance);
+									// solution.setComment(msg);
+									comment = msg;
+									// break; // Don't break, but continue for twist or other types of commands
+								} else if (min_distance == 0.0) {  // if min_distance is zero, we succeed in any case
+									single_arm_success = true;
+								} 
+
+
+								// else if (!single_arm_success){
+								// 	// solution.setComment("failed to move full distance");
+								// 	comment = "failed to move full distance";
+								// 	// break;
+								// }
+
+								// visualize plan
+								auto ns = props.get<std::string>("marker_ns");
+								if (!ns.empty() && linear_norm > 0) {  // ensures that 'distance' is the norm of the reached distance
+									visualizePlan(solution.markers(), dir, single_arm_success, ns, scene->getPlanningFrame(), ik_pose_world, reached_pose,
+												linear, reached_distances_[group]);
+								}
+							}
+						}
+					}
+				} // COMPUTE block ends here
+
+				if (!single_arm_success) {
+					overall_success = false;
+					RCLCPP_INFO_STREAM(LOGGER, "Planning for this variant failed");
+					overall_comment += "Failed to plan for group " + group + ": " + comment + "\n";
+					break;
+				}
 			}
+
+			// if reached distances are different for different groups, we cannot merge the trajectories
+			if (reached_distances_.size() >= 2) {
+				auto it = reached_distances_.begin();
+				double d = it->second;
+				++it;
+				for (; it != reached_distances_.end(); ++it) {
+					if (std::fabs(it->second - d) > 1e-5) {
+						// If we have different reached distances, we cannot merge
+						RCLCPP_WARN_STREAM(LOGGER, "Reached distances differ for groups: " << group << " and " << it->first);
+						// overall_comment += "Reached distances differ for groups: " + group + " and " + it->first + "\n";
+						overall_success = false;
+					}
+				}
 			}
 
 			// store result
