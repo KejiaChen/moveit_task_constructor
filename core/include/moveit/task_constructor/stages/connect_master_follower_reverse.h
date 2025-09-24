@@ -43,6 +43,8 @@
 #include <moveit/task_constructor/cost_terms.h>
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <rviz_marker_tools/marker_creation.h>
 #include <moveit/task_constructor/solvers/cartesian_path.h>
 #include <moveit/task_constructor/solvers/pipeline_planner.h>
 
@@ -54,6 +56,8 @@
 #include <algorithm>
 #include <cctype>
 #include <tf2_eigen/tf2_eigen.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <random>
 
 namespace moveit {
 namespace core {
@@ -76,6 +80,8 @@ namespace stages {
  */
 using GroupPoseDict = std::map<std::string, geometry_msgs::msg::PoseStamped>;
 using GroupStringDict = std::map<std::string, std::string>;
+
+static const rclcpp::Logger LOGGER = rclcpp::get_logger("ConnectMFReverse");
 
 // ---- 1) Dump one trajectory to a TXT file: time, q..., dq... ----
 inline bool dumpTrajectoryTXT(const robot_trajectory::RobotTrajectory& traj,
@@ -320,6 +326,8 @@ protected:
   GroupPlannerVector interpolation_planner_;
   GroupCartPlannerVector cartesian_planner_;
   GroupPipePlannerVector chomp_planner_;
+
+  std::mt19937 rng_{ std::random_device{}() };
   // GroupPlannerVector hand_planner_;
 
 public:
@@ -466,6 +474,301 @@ private:
 
   void detachCollisionCable(planning_scene::PlanningScenePtr scene,
                              const std::string& id);
+
+  // --- Helper: resolve "frame_name" into a world transform without TF ---
+  // Works for: robot/link frames, planning frame, and *world objects by id*.
+  inline bool resolveFrameInSceneTFfree(const planning_scene::PlanningSceneConstPtr& scene,
+                                        const std::string& frame_name,
+                                        Eigen::Isometry3d& T_world_frame_out)
+  {
+    // Planning frame shortcut
+    if (frame_name == scene->getPlanningFrame()) {
+      T_world_frame_out.setIdentity();
+      return true;
+    }
+
+    // Known to PlanningScene's internal transform graph?
+    if (scene->knowsFrameTransform(frame_name)) {
+      T_world_frame_out = scene->getFrameTransform(frame_name);
+      return true;
+    }
+
+    // Try as a world object id
+    auto obj = scene->getWorld()->getObject(frame_name);
+    if (obj) {
+      // Prefer the object's pose in world, if available (MoveIt stores pose_ for the object)
+      // NOTE: pose_ is public in World::Object in current MoveIt; if not, fall back to first shape pose.
+  #if defined(HAVE_WORLD_OBJECT_POSE_) || 1
+      // Most MoveIt versions expose obj->pose_
+      T_world_frame_out = obj->pose_;
+      return true;
+  #else
+      // Fallback: use first shape pose if present (already in world)
+      if (!obj->shape_poses_.empty()) {
+        T_world_frame_out = obj->shape_poses_.front();
+        return true;
+      }
+  #endif
+    }
+
+    return false; // unknown to scene
+  }
+
+  // --- Transform pose_in from its header frame -> target_frame, TF-free via PlanningScene/World ---
+  inline geometry_msgs::msg::PoseStamped transformPoseWithScene(
+      const planning_scene::PlanningSceneConstPtr& scene,
+      const geometry_msgs::msg::PoseStamped& pose_in,
+      const std::string& target_frame)
+  {
+    geometry_msgs::msg::PoseStamped out = pose_in;
+
+    // Early exit if frames already match
+    if (pose_in.header.frame_id == target_frame)
+      return out;
+
+    // Resolve source frame in world
+    Eigen::Isometry3d T_world_src;
+    if (!resolveFrameInSceneTFfree(scene, pose_in.header.frame_id, T_world_src)) {
+      RCLCPP_ERROR(LOGGER, "Cannot resolve source frame '%s' in PlanningScene/World",
+                  pose_in.header.frame_id.c_str());
+      return out; // unchanged
+    }
+
+    // Resolve target frame in world
+    Eigen::Isometry3d T_world_tgt;
+    if (!resolveFrameInSceneTFfree(scene, target_frame, T_world_tgt)) {
+      RCLCPP_ERROR(LOGGER, "Cannot resolve target frame '%s' in PlanningScene/World",
+                  target_frame.c_str());
+      return out; // unchanged
+    }
+
+    // Pose in source frame -> Eigen
+    Eigen::Isometry3d T_src_pose = Eigen::Isometry3d::Identity();
+    tf2::fromMsg(pose_in.pose, T_src_pose);
+
+    // target <- pose  = (target <- world) * (world <- source) * (source <- pose)
+    const Eigen::Isometry3d T_tgt_pose = T_world_tgt.inverse() * T_world_src * T_src_pose;
+
+    out.header.frame_id = target_frame;
+    out.pose = tf2::toMsg(T_tgt_pose);
+    return out;
+  }
+
+
+  /* Sample Grasping Position and Orientation*/
+  struct ClipSamplingWindow {
+    double theta_min = 0.0;
+    double theta_max = M_PI / 2.0;  // 90°
+    double phi_min   = 0.0;
+    double phi_max   = M_PI / 6.0;        // 30°
+  };
+
+  // Return unit vector g in the CLIP frame (goal frame)
+  inline Eigen::Vector3d sample_g_in_clip(std::mt19937& rng,
+                                         ClipSamplingWindow win) {
+    std::uniform_real_distribution<double> U(0.0, 1.0);
+
+    // 1) Sample phi uniformly in [phi_min, phi_max]
+    const double phi = win.phi_min + (win.phi_max - win.phi_min) * U(rng);
+
+    // 2) Area-uniform theta: sample cos(theta) uniformly on [cos(theta_max), cos(theta_min)]
+    const double cmin = std::cos(win.theta_max);   // lower cos = more tilt
+    const double cmax = std::cos(win.theta_min);   // upper cos
+    const double c    = cmin + (cmax - cmin) * U(rng);   // cos(theta)
+    const double s    = std::sqrt(std::max(0.0, 1.0 - c * c));
+    const double cp   = std::cos(phi);
+    const double sp   = std::sin(phi);
+
+    // u=[1,0,0], v=[0,1,0], w=[0,0,1] in the clip frame
+    // g = c*u + s*(cp*v + sp*w)
+    //   = [ c,  s*cp,  s*sp ]
+    Eigen::Vector3d g(c, s * cp, s * sp);
+
+    // align with clip frame, rotate 180° about z (w): (x,y,z) -> (-x,-y,z)
+    g.x() = -g.x();
+    g.y() = -g.y();
+    // g.z() unchanged
+
+    return g.normalized();  // already unit, normalization is a safety net
+  }
+
+  // Optional: convenience that returns a Vector3Stamped in the clip frame
+  inline geometry_msgs::msg::Vector3Stamped sample_g_msg(std::mt19937& rng,
+                                                        const std::string& clip_frame,
+                                                        ClipSamplingWindow win) {
+    Eigen::Vector3d g = sample_g_in_clip(rng, win);
+    geometry_msgs::msg::Vector3Stamped out;
+    out.header.frame_id = clip_frame;
+    out.vector.x = g.x();
+    out.vector.y = g.y();
+    out.vector.z = g.z();
+    return out;
+  }
+
+  
+
+  // Example: compute TCP positions in clip frame, then (optionally) make PoseStamped
+  inline geometry_msgs::msg::PoseStamped tcp_at_clip_origin_plus(
+                                                                const Eigen::Isometry3d & grasp_center,
+                                                                const Eigen::Vector3d& g,
+                                                                double d,
+                                                                const std::string& clip_frame) {
+    geometry_msgs::msg::PoseStamped p;
+    p.header.frame_id = clip_frame;
+    p.pose.position.x = grasp_center.translation().x() + d * g.x();
+    p.pose.position.y = grasp_center.translation().y() + d * g.y();
+    p.pose.position.z = grasp_center.translation().z() + d * g.z();
+    // Orientation can be set later (e.g., align hand axis with ±g). Identity here:
+    p.pose.orientation.w = 1.0;
+    p.pose.orientation.x = p.pose.orientation.y = p.pose.orientation.z = 0.0;
+    return p;
+  }
+
+  // Build yaw quaternion (about world Z) from a world-frame direction vector
+  inline Eigen::Quaterniond yawFromDirectionWorldZ(const Eigen::Vector3d& dir_world) {
+    // Project onto XY, fallback to +X if degenerate
+    Eigen::Vector2d p(dir_world.x(), dir_world.y());
+    if (p.norm() < 1e-9) return Eigen::Quaterniond::Identity();
+    double yaw = std::atan2(p.y(), p.x());
+     return Eigen::Quaterniond(Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()));
+  }
+
+  // Combine: yaw from sampled direction, pitch/roll from fixing
+  inline Eigen::Quaterniond combineYawFromDir_keepFixingPitchRoll(
+      const Eigen::Vector3d& grasp_dir_world,
+      const Eigen::Quaterniond& fixing_orientation)
+  {
+    // 1) yaw from grasp direction
+    Eigen::Quaterniond grasp_yaw_q = yawFromDirectionWorldZ(grasp_dir_world);
+
+    // 2) remove yaw from fixing
+    Eigen::Matrix3d R_fix = fixing_orientation.toRotationMatrix();
+    double fix_yaw = std::atan2(R_fix(1,0), R_fix(0,0));
+    Eigen::AngleAxisd yaw_inv(-fix_yaw, Eigen::Vector3d::UnitZ());
+    Eigen::Quaterniond fix_wo_yaw(yaw_inv * R_fix);
+
+    // 3) apply grasp yaw
+    return grasp_yaw_q * fix_wo_yaw;
+  }
+
+  static void makeAxisArrows(visualization_msgs::msg::Marker& m_template,
+                            const Eigen::Isometry3d& T_world,
+                            double axis_len,
+                            std::deque<visualization_msgs::msg::Marker>& out)
+  {
+    const Eigen::Vector3d p0 = T_world.translation();
+    const Eigen::Quaterniond q(T_world.rotation());
+
+    auto make_arrow = [&](const Eigen::Vector3d& axis_dir,
+                          const std_msgs::msg::ColorRGBA& color,
+                          int id){
+      visualization_msgs::msg::Marker m = m_template;
+      m.id = id;
+
+      const Eigen::Vector3d p1 = p0 + q * axis_dir.normalized() * axis_len;
+      rviz_marker_tools::makeArrow(m, p0, p1, 0.08 * axis_len, 0.024 * axis_len); // shaft len, head len
+      m.scale.x = 0.012;   // shaft diameter
+      m.scale.y = 0.024;   // head diameter
+      m.scale.z = 0.0;     // unused by makeArrow path
+      m.color = color;
+      out.push_back(std::move(m));
+    };
+
+    std_msgs::msg::ColorRGBA red, green, blue;
+    red.r=1.0; red.a=1.0; green.g=1.0; green.a=1.0; blue.b=1.0; blue.a=1.0;
+
+    make_arrow(Eigen::Vector3d::UnitX(), red,   /*id*/0); // X
+    make_arrow(Eigen::Vector3d::UnitY(), green, /*id*/1); // Y
+    make_arrow(Eigen::Vector3d::UnitZ(), blue,  /*id*/2); // Z
+  }
+
+  // ---------- adapted visualizer for your inputs ----------
+  static void visualizeGraspsForClipInputs(std::deque<visualization_msgs::msg::Marker>& markers,
+                                          bool success,
+                                          const std::string& ns,
+                                          const geometry_msgs::msg::PoseStamped& leader_tcp_world,
+                                          const geometry_msgs::msg::PoseStamped& follower_tcp_world,
+                                          const geometry_msgs::msg::PoseStamped& clip_origin_world,
+                                          double d_m, 
+                                          double d_f,
+                                          double axis_len = 0.15)
+  {
+    // Frame id: use leader’s header (you’re passing "world")
+    const std::string frame_id = leader_tcp_world.header.frame_id;
+
+    // Convert poses to Eigen
+    Eigen::Isometry3d T_leader = Eigen::Isometry3d::Identity();
+    Eigen::Isometry3d T_follower = Eigen::Isometry3d::Identity();
+    Eigen::Isometry3d T_origin = Eigen::Isometry3d::Identity();
+    tf2::fromMsg(leader_tcp_world.pose,   T_leader);
+    tf2::fromMsg(follower_tcp_world.pose, T_follower);
+    tf2::fromMsg(clip_origin_world.pose,  T_origin);
+
+    const Eigen::Vector3d p_lead    = T_leader.translation();
+    const Eigen::Vector3d p_follow  = T_follower.translation();
+    const Eigen::Vector3d p_origin  = T_origin.translation();
+
+    // Derive g_world from the geometry (leader is at p_origin + d_m * g)
+    Eigen::Vector3d g_world = p_lead - p_origin;
+    double g_n = g_world.norm();
+    if (g_n > 1e-9) g_world /= g_n;      // normalize
+    else            g_world = Eigen::Vector3d::UnitX(); // fallback
+
+    visualization_msgs::msg::Marker m;
+    m.ns = ns;
+    m.header.frame_id = frame_id;
+    m.action = visualization_msgs::msg::Marker::ADD;
+
+    // 1) Axis frames at each TCP
+    makeAxisArrows(m, T_leader,   axis_len, markers);
+    m.id += 3; // avoid id clashes between frames
+    makeAxisArrows(m, T_follower, axis_len, markers);
+    m.id += 3;
+
+    // 2) Grasp lines from clip origin to each TCP (green if success, red otherwise)
+    std_msgs::msg::ColorRGBA ok, bad;
+    ok.g=1.0; ok.a=1.0; bad.r=1.0; bad.a=1.0;
+
+    auto line_to_tcp = [&](const Eigen::Vector3d& p_tcp, int id, const std_msgs::msg::ColorRGBA& color){
+      visualization_msgs::msg::Marker l = m;
+      l.id = id;
+      l.type = visualization_msgs::msg::Marker::ARROW;
+      rviz_marker_tools::makeArrow(l, p_origin, p_tcp, 0.06 * axis_len, 0.018 * axis_len);
+      l.scale.x = 0.008;  // shaft dia
+      l.scale.y = 0.018;  // head dia
+      l.color = color;
+      markers.push_back(std::move(l));
+    };
+
+    const auto& C = success ? ok : bad;
+    line_to_tcp(p_lead,   m.id++, C);
+    line_to_tcp(p_follow, m.id++, C);
+
+    // 3) Intended grasp direction at the clip origin
+    {
+      visualization_msgs::msg::Marker g = m;
+      g.id = m.id++;
+      g.type = visualization_msgs::msg::Marker::ARROW;
+      rviz_marker_tools::makeArrow(g, p_origin, p_origin + g_world * axis_len, 0.06 * axis_len, 0.018 * axis_len);
+      rviz_marker_tools::setColor(g.color, rviz_marker_tools::CYAN);
+      markers.push_back(std::move(g));
+    }
+
+    // 4) Text with d_m / d_f
+    {
+      visualization_msgs::msg::Marker t = m;
+      t.id = m.id++;
+      t.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+      Eigen::Vector3d text_pos = p_origin + 0.5 * axis_len * Eigen::Vector3d::UnitZ();
+      t.pose.position = tf2::toMsg(text_pos);
+      t.scale.z = 0.06; // text height
+      std::ostringstream oss;
+      oss << "d_m=" << std::fixed << std::setprecision(3) << d_m << "  d_f=" << std::fixed << std::setprecision(3) << d_f;
+      t.text = oss.str();
+      rviz_marker_tools::setColor(t.color, rviz_marker_tools::WHITE);
+      markers.push_back(std::move(t));
+    }
+  }
   
   const moveit::core::JointModelGroup* follow_jmg_;
   const moveit::core::JointModelGroup* follow_hand_jmg_;
@@ -474,9 +777,15 @@ private:
   moveit::planning_interface::MoveGroupInterfacePtr move_group_lead_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
 
-  Eigen::Isometry3d hand_to_tcp_transform_;
+  Eigen::Isometry3d lead_hand_to_tcp_transform_;
+  Eigen::Isometry3d follow_hand_to_tcp_transform_;
   Eigen::Isometry3d lead_flange_to_tcp_transform_;
   Eigen::Isometry3d follow_flange_to_tcp_transform_;
+
+  geometry_msgs::msg::PoseStamped lead_grasp_tcp_pose_clip_;
+  geometry_msgs::msg::PoseStamped follow_grasp_tcp_pose_clip_;
+  geometry_msgs::msg::PoseStamped lead_grasp_tcp_pose_world_;
+  geometry_msgs::msg::PoseStamped follow_grasp_tcp_pose_world_;
 
   int follower_start_index_ = -1;
   int reversed_follower_start_index_ = -1;
