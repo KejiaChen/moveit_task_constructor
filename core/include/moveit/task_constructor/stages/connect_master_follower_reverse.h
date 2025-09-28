@@ -558,59 +558,135 @@ private:
   /* Sample Grasping Position and Orientation*/
   struct ClipSamplingWindow {
     double theta_min = 0.0;
-    double theta_max = M_PI / 2.0;  // 90°
+    double theta_max = 2 * M_PI / 3.0;  // 60°
     double phi_min   = 0.0;
-    double phi_max   = M_PI / 6.0;        // 30°
+    double phi_max   = M_PI / 12.0;        // 15°
   };
 
   // Return unit vector g in the CLIP frame (goal frame)
-  inline Eigen::Vector3d sample_g_in_clip(std::mt19937& rng,
-                                         ClipSamplingWindow win) {
+  inline std::pair<Eigen::Vector3d, Eigen::Quaterniond> sample_g_in_clip(std::mt19937& rng,
+                                                                        ClipSamplingWindow win,
+                                                                        int clip_sign) {
     std::uniform_real_distribution<double> U(0.0, 1.0);
 
     // 1) Sample phi uniformly in [phi_min, phi_max]
     const double phi = win.phi_min + (win.phi_max - win.phi_min) * U(rng);
-
-    // 2) Area-uniform theta: sample cos(theta) uniformly on [cos(theta_max), cos(theta_min)]
-    const double cmin = std::cos(win.theta_max);   // lower cos = more tilt
-    const double cmax = std::cos(win.theta_min);   // upper cos
-    const double c    = cmin + (cmax - cmin) * U(rng);   // cos(theta)
-    const double s    = std::sqrt(std::max(0.0, 1.0 - c * c));
     const double cp   = std::cos(phi);
     const double sp   = std::sin(phi);
+
+    // 2) Area-uniform theta: sample cos(theta) uniformly on [cos(theta_max), cos(theta_min)]
+    // const double cmin = std::cos(win.theta_max);   // lower cos = more tilt
+    // const double cmax = std::cos(win.theta_min);   // upper cos
+    // const double c    = cmin + (cmax - cmin) * U(rng);   // cos(theta)
+    // const double s    = std::sqrt(std::max(0.0, 1.0 - c * c));
+    const double theta = win.theta_min + (win.theta_max - win.theta_min) * U(rng);
+    const double c     = std::cos(theta);
+    const double s     = std::sin(theta);
 
     // u=[1,0,0], v=[0,1,0], w=[0,0,1] in the clip frame
     // g = c*u + s*(cp*v + sp*w)
     //   = [ c,  s*cp,  s*sp ]
     Eigen::Vector3d g(c, s * cp, s * sp);
-
     // align with clip frame, rotate 180° about z (w): (x,y,z) -> (-x,-y,z)
-    g.x() = -g.x();
-    g.y() = -g.y();
+    g.x() = clip_sign * g.x();
+    g.y() = clip_sign * g.y();
     // g.z() unchanged
 
-    return g.normalized();  // already unit, normalization is a safety net
+    // construct quaternion with theta and phi
+    const Eigen::AngleAxisd Rz_theta(theta + M_PI/2, Eigen::Vector3d::UnitZ());
+    const Eigen::AngleAxisd Rx_phi  (phi,   Eigen::Vector3d::UnitX());
+    Eigen::Quaterniond quat_clip = Eigen::Quaterniond(Rx_phi) * Eigen::Quaterniond(Rz_theta); // Rx(phi)*Rz(theta)
+    // if (z_flip_pi) {
+      quat_clip = Eigen::Quaterniond(Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ())) * quat_clip;  // Rz(pi) *
+    // }
+
+    return {g.normalized(), quat_clip.normalized()};  // already unit, normalization is a safety net
   }
 
-  // Optional: convenience that returns a Vector3Stamped in the clip frame
-  inline geometry_msgs::msg::Vector3Stamped sample_g_msg(std::mt19937& rng,
-                                                        const std::string& clip_frame,
-                                                        ClipSamplingWindow win) {
-    Eigen::Vector3d g = sample_g_in_clip(rng, win);
-    geometry_msgs::msg::Vector3Stamped out;
-    out.header.frame_id = clip_frame;
-    out.vector.x = g.x();
-    out.vector.y = g.y();
-    out.vector.z = g.z();
-    return out;
+  // // Optional: convenience that returns a Vector3Stamped in the clip frame
+  // inline geometry_msgs::msg::Vector3Stamped sample_g_msg(std::mt19937& rng,
+  //                                                       const std::string& clip_frame,
+  //                                                       ClipSamplingWindow win) {
+  //   // Eigen::Vector3d g;
+  //   // Eigen::Quaterniond quat_clip;
+  //   auto [g, quat_clip] = sample_g_in_clip(rng, win, );
+  //   geometry_msgs::msg::Vector3Stamped out;
+  //   out.header.frame_id = clip_frame;
+  //   out.vector.x = g.x();
+  //   out.vector.y = g.y();
+  //   out.vector.z = g.z();
+  //   return out;
+  // }
+
+  inline Eigen::Isometry3d getLinkPoseInClipFrame(
+      const planning_scene::PlanningSceneConstPtr& scene,
+      const std::string& link_name,
+      const std::string& clip_frame)
+  {
+    // world <- link
+    const moveit::core::RobotState& rs = scene->getCurrentState();
+    const Eigen::Isometry3d T_world_link = rs.getGlobalLinkTransform(link_name);
+
+    // world <- clip
+    if (!scene->knowsFrameTransform(clip_frame)) {
+      throw std::runtime_error("PlanningScene does not know clip frame: " + clip_frame);
+    }
+    const Eigen::Isometry3d T_world_clip = scene->getFrameTransform(clip_frame);
+
+    // clip <- link
+    return T_world_clip.inverse() * T_world_link;
   }
 
-  
+  // --- 2) Pick the default orientation (clip frame) closest to current ---
+  inline Eigen::Quaterniond selectDefaultOrientationInClip(
+      const Eigen::Quaterniond& q_current_clip,
+      const Eigen::Quaterniond& q1_clip,
+      const Eigen::Quaterniond& q2_clip,
+      bool select_orientation /*if false, always q1*/)
+  {
+    if (!select_orientation) return q1_clip;
+    const double a1 = q_current_clip.angularDistance(q1_clip);
+    const double a2 = q_current_clip.angularDistance(q2_clip);
+    return (a1 <= a2) ? q1_clip : q2_clip;
+  }
+
+  // --- 3) Build TCP pose at grasp_center + d*g with selected default orientation (clip frame) ---
+  inline geometry_msgs::msg::PoseStamped tcp_at_clip_with_default_orientation(
+      const planning_scene::PlanningSceneConstPtr& scene,
+      const std::string& ee_link_name,           // e.g., "right_panda_hand"
+      const Eigen::Isometry3d& grasp_center_clip,// origin/center in clip frame
+      const Eigen::Vector3d& g_clip,             // unit grasp direction (clip frame)
+      double d,                                   // distance along g
+      const std::string& clip_frame,
+      bool select_orientation,                    // mimic your flag
+      // your two default quaternions in CLIP frame:
+      const Eigen::Quaterniond& q_default_1_clip,
+      const Eigen::Quaterniond& q_default_2_clip)
+  {
+    // current EE orientation in CLIP frame
+    const Eigen::Isometry3d T_clip_link = getLinkPoseInClipFrame(scene, ee_link_name, clip_frame);
+    const Eigen::Quaterniond q_curr_clip(T_clip_link.rotation());
+
+    // choose default orientation
+    const Eigen::Quaterniond q_goal_clip =
+        selectDefaultOrientationInClip(q_curr_clip, q_default_1_clip, q_default_2_clip, select_orientation);
+
+    // position = grasp_center + d*g
+    const Eigen::Vector3d p_clip = grasp_center_clip.translation() + d * g_clip;
+
+    // pack PoseStamped in CLIP frame
+    geometry_msgs::msg::PoseStamped p;
+    p.header.frame_id = clip_frame;
+    p.pose.position = tf2::toMsg(p_clip);
+    p.pose.orientation = tf2::toMsg(q_goal_clip.normalized());
+    return p;
+  }
 
   // Example: compute TCP positions in clip frame, then (optionally) make PoseStamped
   inline geometry_msgs::msg::PoseStamped tcp_at_clip_origin_plus(
                                                                 const Eigen::Isometry3d & grasp_center,
                                                                 const Eigen::Vector3d& g,
+                                                                const Eigen::Quaterniond& q,
                                                                 double d,
                                                                 const std::string& clip_frame) {
     geometry_msgs::msg::PoseStamped p;
@@ -619,8 +695,11 @@ private:
     p.pose.position.y = grasp_center.translation().y() + d * g.y();
     p.pose.position.z = grasp_center.translation().z() + d * g.z();
     // Orientation can be set later (e.g., align hand axis with ±g). Identity here:
-    p.pose.orientation.w = 1.0;
-    p.pose.orientation.x = p.pose.orientation.y = p.pose.orientation.z = 0.0;
+    Eigen::Quaterniond nq = q.normalized();
+    p.pose.orientation.x = nq.x();
+    p.pose.orientation.y = nq.y();
+    p.pose.orientation.z = nq.z();
+    p.pose.orientation.w = nq.w();
     return p;
   }
 
@@ -781,6 +860,10 @@ private:
   Eigen::Isometry3d follow_hand_to_tcp_transform_;
   Eigen::Isometry3d lead_flange_to_tcp_transform_;
   Eigen::Isometry3d follow_flange_to_tcp_transform_;
+  
+  Eigen::Quaterniond lead_grasp_orientation_;
+  Eigen::Quaterniond follow_grasp_orientation_;
+  Eigen::Quaterniond transport_rotation_; // should be a constant during transport
 
   geometry_msgs::msg::PoseStamped lead_grasp_tcp_pose_clip_;
   geometry_msgs::msg::PoseStamped follow_grasp_tcp_pose_clip_;
