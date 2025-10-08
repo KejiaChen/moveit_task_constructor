@@ -331,86 +331,86 @@ void ComputeIKMultiple::compute() {
 
 	// compute IK for each robot in loops
 	for (auto& group_name : group_names_) {
-	// std::string group_name = group_names[0];
-	if (!validateEEF(props, robot_model, eef_jmg, &msg, group_name)) {
-		RCLCPP_WARN_STREAM(LOGGER, msg);
-		return;
-	}
-	if (!validateGroup(props, robot_model, eef_jmg, jmg, &msg, group_name)) {
-		RCLCPP_WARN_STREAM(LOGGER, msg);
-		return;
-	}
-	if (!eef_jmg && !jmg) {
-		RCLCPP_WARN_STREAM(LOGGER, "Neither eef nor group are well defined");
-		return;
-	}
-
-	properties().property("timeout").setDefaultValue(jmg->getDefaultIKTimeout());
-
-	// extract target_pose
-	// geometry_msgs::msg::PoseStamped target_pose_msg = props.get<geometry_msgs::msg::PoseStamped>("target_pose");
-	geometry_msgs::msg::PoseStamped target_pose_msg = target_poses[group_name];
-	if (target_pose_msg.header.frame_id.empty())  // if not provided, assume planning frame
-		target_pose_msg.header.frame_id = scene->getPlanningFrame();
-
-	Eigen::Isometry3d target_pose;
-	tf2::fromMsg(target_pose_msg.pose, target_pose);
-	if (target_pose_msg.header.frame_id != scene->getPlanningFrame()) {
-		if (!scene->knowsFrameTransform(target_pose_msg.header.frame_id)) {
-			RCLCPP_WARN_STREAM(LOGGER, "Unknown reference frame for target pose: " << target_pose_msg.header.frame_id);
+		// std::string group_name = group_names[0];
+		if (!validateEEF(props, robot_model, eef_jmg, &msg, group_name)) {
+			RCLCPP_WARN_STREAM(LOGGER, msg);
 			return;
 		}
-		// transform target_pose w.r.t. planning frame
-		target_pose = scene->getFrameTransform(target_pose_msg.header.frame_id) * target_pose;
-	}
-
-	// determine IK link from ik_frame
-	const moveit::core::LinkModel* link = nullptr;
-	geometry_msgs::msg::PoseStamped ik_pose_msg;
-	// const boost::any& value = props.get("ik_frame");
-	const boost::any& value = ik_frames.at(group_name);
-	if (value.empty()) {  // property undefined
-		//  determine IK link from eef/group
-		if (!(link = eef_jmg ? robot_model->getLinkModel(eef_jmg->getEndEffectorParentGroup().second) :
-		                       jmg->getOnlyOneEndEffectorTip())) {
-			RCLCPP_WARN_STREAM(LOGGER, "Failed to derive IK target link");
+		if (!validateGroup(props, robot_model, eef_jmg, jmg, &msg, group_name)) {
+			RCLCPP_WARN_STREAM(LOGGER, msg);
 			return;
 		}
-		ik_pose_msg.header.frame_id = link->getName();
-		ik_pose_msg.pose.orientation.w = 1.0;
-	} else {
-		ik_pose_msg = boost::any_cast<geometry_msgs::msg::PoseStamped>(value);
-		Eigen::Isometry3d ik_pose;
-		// this ik_pose is pose of EE (finger tip) in panda_hand frame
-		tf2::fromMsg(ik_pose_msg.pose, ik_pose);
-
-		if (!scene->getCurrentState().knowsFrameTransform(ik_pose_msg.header.frame_id)) {
-			RCLCPP_WARN_STREAM(LOGGER, "ik frame unknown in robot: '" << ik_pose_msg.header.frame_id << "'");
+		if (!eef_jmg && !jmg) {
+			RCLCPP_WARN_STREAM(LOGGER, "Neither eef nor group are well defined");
 			return;
 		}
-		// this generated ik_pose below is pose of EE (finger tip) in world frame
-		ik_pose = scene->getCurrentState().getFrameTransform(ik_pose_msg.header.frame_id) * ik_pose;
-		
-		// parent link of ik frame
-		// in this case is panda_link7 (panda_link8 is connected to EE thorugh fixed joint)
-		link = scene->getCurrentState().getRigidlyConnectedParentLinkModel(ik_pose_msg.header.frame_id);
-		RCLCPP_INFO_STREAM(LOGGER, "IK frame: " << ik_pose_msg.header.frame_id << " parent link: " << link->getName());
 
-		// transform target pose such that ik frame will reach there if link (panda_link8) does
-		// get the desired flange pose when desired EE pose is reached
-		target_pose = target_pose * ik_pose.inverse() * scene->getCurrentState().getFrameTransform(link->getName());
-	}
+		properties().property("timeout").setDefaultValue(jmg->getDefaultIKTimeout());
 
-	// add target pose and tip into vector
-	multiple_target_pose.push_back(target_pose);
-	multiple_tip_links.push_back(link);
-	multiple_tip_names.push_back(link->getName());
+		// extract target_pose
+		// geometry_msgs::msg::PoseStamped target_pose_msg = props.get<geometry_msgs::msg::PoseStamped>("target_pose");
+		geometry_msgs::msg::PoseStamped target_pose_msg = target_poses[group_name];
+		if (target_pose_msg.header.frame_id.empty())  // if not provided, assume planning frame
+			target_pose_msg.header.frame_id = scene->getPlanningFrame();
 
-	// frames at target pose and ik frame
-	rviz_marker_tools::appendFrame(frame_markers, target_pose_msg, 0.1, "target frame");
-	rviz_marker_tools::appendFrame(frame_markers, ik_pose_msg, 0.1, "ik frame");
+		Eigen::Isometry3d target_pose;
+		tf2::fromMsg(target_pose_msg.pose, target_pose);
+		if (target_pose_msg.header.frame_id != scene->getPlanningFrame()) {
+			if (!scene->knowsFrameTransform(target_pose_msg.header.frame_id)) {
+				RCLCPP_WARN_STREAM(LOGGER, "Unknown reference frame for target pose: " << target_pose_msg.header.frame_id);
+				return;
+			}
+			// transform target_pose w.r.t. planning frame
+			target_pose = scene->getFrameTransform(target_pose_msg.header.frame_id) * target_pose;
+		}
 
-	// loop end here for single joint group
+		// determine IK link from ik_frame
+		const moveit::core::LinkModel* link = nullptr;
+		geometry_msgs::msg::PoseStamped ik_pose_msg;
+		// const boost::any& value = props.get("ik_frame");
+		const boost::any& value = ik_frames.at(group_name);
+		if (value.empty()) {  // property undefined
+			//  determine IK link from eef/group
+			if (!(link = eef_jmg ? robot_model->getLinkModel(eef_jmg->getEndEffectorParentGroup().second) :
+								jmg->getOnlyOneEndEffectorTip())) {
+				RCLCPP_WARN_STREAM(LOGGER, "Failed to derive IK target link");
+				return;
+			}
+			ik_pose_msg.header.frame_id = link->getName();
+			ik_pose_msg.pose.orientation.w = 1.0;
+		} else {
+			ik_pose_msg = boost::any_cast<geometry_msgs::msg::PoseStamped>(value);
+			Eigen::Isometry3d ik_pose;
+			// this ik_pose is pose of EE (finger tip) in panda_hand frame
+			tf2::fromMsg(ik_pose_msg.pose, ik_pose);
+
+			if (!scene->getCurrentState().knowsFrameTransform(ik_pose_msg.header.frame_id)) {
+				RCLCPP_WARN_STREAM(LOGGER, "ik frame unknown in robot: '" << ik_pose_msg.header.frame_id << "'");
+				return;
+			}
+			// this generated ik_pose below is pose of EE (finger tip) in world frame
+			ik_pose = scene->getCurrentState().getFrameTransform(ik_pose_msg.header.frame_id) * ik_pose;
+			
+			// parent link of ik frame
+			// in this case is panda_link7 (panda_link8 is connected to EE thorugh fixed joint)
+			link = scene->getCurrentState().getRigidlyConnectedParentLinkModel(ik_pose_msg.header.frame_id);
+			RCLCPP_INFO_STREAM(LOGGER, "IK frame: " << ik_pose_msg.header.frame_id << " parent link: " << link->getName());
+
+			// transform target pose such that ik frame will reach there if link (panda_link8) does
+			// get the desired flange pose when desired EE pose is reached
+			target_pose = target_pose * ik_pose.inverse() * scene->getCurrentState().getFrameTransform(link->getName());
+		}
+
+		// add target pose and tip into vector
+		multiple_target_pose.push_back(target_pose);
+		multiple_tip_links.push_back(link);
+		multiple_tip_names.push_back(link->getName());
+
+		// frames at target pose and ik frame
+		rviz_marker_tools::appendFrame(frame_markers, target_pose_msg, 0.1, "target frame");
+		rviz_marker_tools::appendFrame(frame_markers, ik_pose_msg, 0.1, "ik frame");
+
+		// loop end here for single joint group
 	}
 
 	// Dual joint group
