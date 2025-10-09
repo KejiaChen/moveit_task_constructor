@@ -40,7 +40,6 @@
 
 #include <moveit/planning_scene/planning_scene.h>
 #include <moveit/robot_state/conversions.h>
-#include <moveit/robot_state/robot_state.h>
 
 #include <Eigen/Geometry>
 #include <tf2_eigen/tf2_eigen.h>
@@ -67,6 +66,7 @@ ComputeIKMultiple::ComputeIKMultiple(const std::string& name, Stage::pointer&& c
 	p.declare<bool>("ignore_collisions", false);
 	p.declare<double>("min_solution_distance", 0.1,
 	                  "minimum distance between seperate IK solutions for the same target");
+	p.declare<double>("singularity_threshold", 0.08, "minimum singularity value for each arm");
 	p.declare<moveit_msgs::msg::Constraints>("constraints", moveit_msgs::msg::Constraints(), "additional constraints to obey");
 	
 	// ik_frame and target_pose are read from the interface
@@ -100,16 +100,17 @@ void ComputeIKMultiple::setTargetPose(std::map<std::string, Eigen::Isometry3d>& 
 
 // found IK solutions
 
-struct IKSolution
+struct IKSolutionMultiple
 {
 	std::vector<double> joint_positions;
 	collision_detection::Contact contact;
-	bool collision_free;
-	bool satisfies_constraints;
-	
+	bool collision_free{false};
+	bool satisfies_constraints{false};
+	bool singularity_check{true};
+	double worst_singularity{1.0};
 };
 
-using IKSolutions = std::vector<IKSolution>;
+using IKSolutionMultiples = std::vector<IKSolutionMultiple>;
 
 namespace {
 
@@ -330,6 +331,7 @@ void ComputeIKMultiple::compute() {
 	moveit::core::RobotState sandbox_state{ scene->getCurrentState() };
 
 	// compute IK for each robot in loops
+	std::map<std::string, GroupInfo> groups_map; 
 	for (auto& group_name : group_names_) {
 		// std::string group_name = group_names[0];
 		if (!validateEEF(props, robot_model, eef_jmg, &msg, group_name)) {
@@ -400,6 +402,10 @@ void ComputeIKMultiple::compute() {
 			// get the desired flange pose when desired EE pose is reached
 			target_pose = target_pose * ik_pose.inverse() * scene->getCurrentState().getFrameTransform(link->getName());
 		}
+		auto& ginfo = groups_map[group_name];
+		ginfo.name = group_name;
+		ginfo.jmg  = jmg;
+		ginfo.tips.push_back(link);   // this tip belongs to THIS group
 
 		// add target pose and tip into vector
 		multiple_target_pose.push_back(target_pose);
@@ -501,9 +507,10 @@ void ComputeIKMultiple::compute() {
 	kinematic_constraints::KinematicConstraintSet constraint_set(robot_model);
 	constraint_set.add(props.get<moveit_msgs::msg::Constraints>("constraints"), scene->getTransforms());
 	
-	IKSolutions ik_solutions;
+	IKSolutionMultiples ik_solutions;
+	const auto& group_names = group_names_;
 	auto is_valid = [scene, ignore_collisions, min_solution_distance,  &constraint_set = std::as_const(constraint_set),
-	                 &ik_solutions](moveit::core::RobotState* state, const moveit::core::JointModelGroup* jmg,
+	                 &ik_solutions, &group_names, &groups_map, &props](moveit::core::RobotState* state, const moveit::core::JointModelGroup* jmg,
 	                                const double* joint_positions) {
 		for (const auto& sol : ik_solutions) {
 			if (jmg->distance(joint_positions, sol.joint_positions.data()) < min_solution_distance)
@@ -515,6 +522,24 @@ void ComputeIKMultiple::compute() {
 		ik_solutions.emplace_back(); // add new ik solution
 		auto& solution{ ik_solutions.back() };
 		state->copyJointGroupPositions(jmg, solution.joint_positions);
+
+		// HARD singularity gate (worst tip): prune early if near-singular
+		for (const auto& group_name : group_names) {
+			const auto& g = groups_map.at(group_name);
+			if (!g.jmg || g.tips.empty()) continue;
+
+			double smin_worst = std::numeric_limits<double>::infinity();
+			for (const auto* tip : g.tips) {
+				const double smin = sigmaMinFullJ(*state, g.jmg, tip->getName());
+				smin_worst = std::min(smin_worst, smin);
+			}
+			solution.worst_singularity = std::min(solution.worst_singularity, smin_worst);
+		}
+
+		if (solution.worst_singularity < props.get<double>("singularity_threshold")) {
+			solution.singularity_check = false;
+			RCLCPP_ERROR(LOGGER, "Near singularity with worst tip sigma_min = %f", solution.worst_singularity);
+		}
 
 		// validate constraints
 		solution.satisfies_constraints = constraint_set.decide(*state).satisfied;
@@ -531,7 +556,7 @@ void ComputeIKMultiple::compute() {
 		if (!res.contacts.empty()) {
 			solution.contact = res.contacts.begin()->second.front();
 		}
-		return solution.satisfies_constraints && solution.collision_free;
+		return solution.satisfies_constraints && solution.collision_free && solution.singularity_check;
 	};
 
 	uint32_t max_ik_solutions = props.get<uint32_t>("max_ik_solutions");
@@ -577,7 +602,10 @@ void ComputeIKMultiple::compute() {
 			// }
 			} else if (!ik_solutions[i].satisfies_constraints) {  // solution was violating constraints
 				solution.markAsFailure("Constraints violated");
-			}
+			} 
+			// else if (!ik_solutions[i].singularity_check) {  // solution was near singular
+			// 	solution.markAsFailure("Near singularity with worst tip sigma_min = " + std::to_string(ik_solutions[i].worst_singularity));
+			// }
 			// set scene's robot state
 			moveit::core::RobotState& solution_state = solution_scene->getCurrentStateNonConst();
 			solution_state.setJointGroupPositions(jmg, ik_solutions[i].joint_positions.data());

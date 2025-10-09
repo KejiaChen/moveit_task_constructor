@@ -39,6 +39,7 @@
 #include <moveit/task_constructor/container.h>
 #include <moveit/task_constructor/cost_queue.h>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <moveit/robot_state/robot_state.h>
 #include <Eigen/Geometry>
 
 namespace moveit {
@@ -68,6 +69,23 @@ namespace stages {
 
 using GroupPoseDict = std::map<std::string, geometry_msgs::msg::PoseStamped>;
 using GroupStringDict = std::map<std::string, std::string>;
+
+// ---------- Helpers ----------
+inline double sigmaMinFullJ(const moveit::core::RobotState& rs,
+                            const moveit::core::JointModelGroup* jmg,
+                            const std::string& tip_link)
+{
+  Eigen::MatrixXd J;
+  rs.getJacobian(jmg, rs.getLinkModel(tip_link), Eigen::Vector3d::Zero(), J);  // 6×N
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(J, Eigen::ComputeThinU | Eigen::ComputeThinV);
+  return svd.singularValues().minCoeff();
+}
+
+struct GroupInfo {
+  std::string name;
+  const moveit::core::JointModelGroup* jmg = nullptr;             // chain JMG for THIS arm/group
+  std::vector<const moveit::core::LinkModel*> tips;                // tips belonging to THIS group
+};
 
 class ComputeIKMultiple : public WrapperBase
 {
