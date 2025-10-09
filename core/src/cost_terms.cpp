@@ -303,6 +303,64 @@ double DirectionalManipulability::operator()(const moveit::task_constructor::Sub
     return 1.0 / std::max(m_mean, eps_);
 }
 
+double ManipulabilitySoftPenalty::operator()(const SubTrajectory& s, 
+											std::string& comment) const
+{
+    // Use the state we have (end if available; else start)
+    const auto* iface = s.end() ? s.end() : s.start();
+    if (!iface || !iface->scene()) {
+      comment = "ManipulabilitySoftPenalty: no valid state";
+      return std::numeric_limits<double>::infinity();
+    }
+    const moveit::core::RobotState& rs = iface->scene()->getCurrentState();
+
+    // Worst-case (min) σ_min across provided groups
+    double smin_worst = std::numeric_limits<double>::infinity();
+    std::ostringstream oss;
+    oss << "σmin: ";
+
+    size_t used = 0;
+    for (const auto& kv : group_ee_) {
+      const auto* jmg = rs.getJointModelGroup(kv.first);
+      const auto* link = rs.getLinkModel(kv.second);
+      if (!jmg || !link) continue;
+
+      const double smin = sigmaMinFullJ(rs, jmg, kv.second);
+      smin_worst = std::min(smin_worst, smin);
+      ++used;
+      oss << kv.first << "=" << smin << " ";
+    }
+
+    if (!used) {
+      comment = "ManipulabilitySoftPenalty: no valid groups";
+      return std::numeric_limits<double>::infinity();
+    }
+
+    const double pen = sigmaPenalty(smin_worst, sigma_warn_, sigma_crit_, hard_gate_);
+    comment = oss.str();
+    return weight_ * pen;
+}
+
+double WeightedSumCost::operator()(const moveit::task_constructor::SubTrajectory& s,
+                    std::string& comment) const
+{
+    if (terms_.empty()) { comment = "WeightedSumCost: no terms"; return 0.0; }
+
+    double total = 0.0;
+    std::ostringstream oss;
+    oss << "WeightedSum: ";
+
+    for (const auto& tw : terms_) {
+      if (!tw.first) continue;
+      std::string cmt;
+      const double c = (*(tw.first))(s, cmt);
+      total += tw.second * c;
+      if (!cmt.empty()) oss << "[" << cmt << "] ";
+    }
+
+    comment = oss.str();
+    return total;
+}
 
 double TrajectoryDuration::operator()(const SubTrajectory& s, std::string& /*comment*/) const {
 	return s.trajectory() ? s.trajectory()->getDuration() : 0.0;

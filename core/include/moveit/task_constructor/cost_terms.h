@@ -41,6 +41,7 @@
 #include <moveit/task_constructor/storage.h>
 #include <moveit/task_constructor/utils.h>
 #include <moveit_msgs/msg/robot_state.h>
+#include <moveit/robot_state/robot_state.h>
 #include <geometry_msgs/msg/vector3_stamped.hpp>
 
 namespace moveit {
@@ -220,6 +221,77 @@ private:
   double eps_;
   Mode  mode_;
 
+};
+
+// ---------- Helpers ----------
+inline double sigmaMinFullJ(const moveit::core::RobotState& rs,
+                            const moveit::core::JointModelGroup* jmg,
+                            const std::string& tip_link)
+{
+  Eigen::MatrixXd J;
+  rs.getJacobian(jmg, rs.getLinkModel(tip_link), Eigen::Vector3d::Zero(), J);  // 6×N
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(J, Eigen::ComputeThinU | Eigen::ComputeThinV);
+  return svd.singularValues().minCoeff();
+}
+
+// Smooth quadratic penalty that turns on below warn
+//  s >= warn         -> 0
+//  crit < s < warn   -> ((warn - s)/warn)^2
+//  s <= crit         -> (hard_gate ? inf : big penalty)
+inline double sigmaPenalty(double s, double warn, double crit, bool hard_gate, double big = 1e6)
+{
+  if (s >= warn) return 0.0;
+  if (s <= crit) return hard_gate ? std::numeric_limits<double>::infinity() : big;
+  const double d = (warn - s) / std::max(1e-12, warn);
+  return d * d;
+}
+
+/* ManipulabilitySoftPenalty */
+class ManipulabilitySoftPenalty : public moveit::task_constructor::CostTerm
+{
+public:
+  // group_ee: map "group_name" -> "ee_link_name" (evaluate worst arm)
+  explicit ManipulabilitySoftPenalty(std::map<std::string, std::string> group_ee,
+                                     double sigma_warn = 3e-3,
+                                     double sigma_crit = 1e-3,
+                                     bool hard_gate = true,
+                                     double weight = 1.0)
+  : group_ee_(std::move(group_ee)),
+    sigma_warn_(sigma_warn), sigma_crit_(sigma_crit),
+    hard_gate_(hard_gate), weight_(weight) {}
+
+  double operator()(const moveit::task_constructor::SubTrajectory& s,
+                    std::string& comment) const override;
+
+  void setThresholds(double warn, double crit) { sigma_warn_ = warn; sigma_crit_ = crit; }
+  void setHardGate(bool on) { hard_gate_ = on; }
+  void setWeight(double w) { weight_ = w; }
+
+private:
+  std::map<std::string, std::string> group_ee_;
+  double sigma_warn_, sigma_crit_;
+  bool hard_gate_;
+  double weight_;
+};
+
+/* WeightedSumCost (combines any cost terms) */
+class WeightedSumCost : public moveit::task_constructor::CostTerm
+{
+public:
+  // Add any number of (cost_term, weight) pairs
+  using TermW = std::pair<std::shared_ptr<moveit::task_constructor::CostTerm>, double>;
+
+  WeightedSumCost() = default;
+  explicit WeightedSumCost(std::initializer_list<TermW> list) : terms_(list) {}
+
+  void add(const std::shared_ptr<moveit::task_constructor::CostTerm>& term, double weight = 1.0)
+  { terms_.emplace_back(term, weight); }
+
+  double operator()(const moveit::task_constructor::SubTrajectory& s,
+                    std::string& comment) const override;
+
+private:
+  std::vector<TermW> terms_;
 };
 
 /** inverse distance to collision
