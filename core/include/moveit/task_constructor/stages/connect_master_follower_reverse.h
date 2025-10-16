@@ -368,8 +368,7 @@ private:
                                         robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                         planning_scene::PlanningScenePtr& intermediate_scene,
                                         planning_scene::PlanningScenePtr& final_scene,
-                                        std::string& return_message,
-                                        bool attach_object=false); 
+                                        std::string& return_message); 
 
   bool computeFirstArmTrajectoryReverse(robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                         robot_trajectory::RobotTrajectoryPtr& follower_hand_trajectory,
@@ -475,6 +474,20 @@ private:
   void detachCollisionCable(planning_scene::PlanningScenePtr scene,
                              const std::string& id);
 
+  void attachCollisionCableGeneric(planning_scene::PlanningScenePtr scene,
+                                 const std::string& id,
+                                 double length,
+                                 double radius,
+                                 const Eigen::Vector3d& vec_in_world,
+                                 const std::string& attach_link,
+                                 const Eigen::Isometry3d& hand_to_tcp_transform,
+                                 const std::vector<std::string>& touch_links,
+                                 rviz_visual_tools::RvizVisualTools& visual_tools,
+                                 const rclcpp::Logger& LOGGER);
+
+  void detachCollisionCableWorldAndRobot(planning_scene::PlanningScenePtr scene,
+                                       const std::string& id); 
+
   // --- Helper: resolve "frame_name" into a world transform without TF ---
   // Works for: robot/link frames, planning frame, and *world objects by id*.
   inline bool resolveFrameInSceneTFfree(const planning_scene::PlanningSceneConstPtr& scene,
@@ -557,10 +570,10 @@ private:
 
   /* Sample Grasping Position and Orientation*/
   struct ClipSamplingWindow {
-    double theta_min = 0.0;
-    double theta_max = 2 * M_PI / 3.0;  // 60°
+    double theta_min = 0;        // 30°
+    double theta_max = M_PI / 2.0;  // 150°
     double phi_min   = 0.0;
-    double phi_max   = M_PI / 12.0;        // 15°
+    double phi_max   = 0.0;//M_PI / 12.0;        // 15°
   };
 
   // Return unit vector g in the CLIP frame (goal frame)
@@ -570,18 +583,18 @@ private:
     std::uniform_real_distribution<double> U(0.0, 1.0);
 
     // 1) Sample phi uniformly in [phi_min, phi_max]
-    const double phi = win.phi_min + (win.phi_max - win.phi_min) * U(rng);
-    const double cp   = std::cos(phi);
-    const double sp   = std::sin(phi);
+    double phi = win.phi_min + (win.phi_max - win.phi_min) * U(rng);
+    double cp   = std::cos(phi);
+    double sp   = std::sin(phi);
 
     // 2) Area-uniform theta: sample cos(theta) uniformly on [cos(theta_max), cos(theta_min)]
     // const double cmin = std::cos(win.theta_max);   // lower cos = more tilt
     // const double cmax = std::cos(win.theta_min);   // upper cos
     // const double c    = cmin + (cmax - cmin) * U(rng);   // cos(theta)
     // const double s    = std::sqrt(std::max(0.0, 1.0 - c * c));
-    const double theta = win.theta_min + (win.theta_max - win.theta_min) * U(rng);
-    const double c     = std::cos(theta);
-    const double s     = std::sin(theta);
+    double theta = win.theta_min + (win.theta_max - win.theta_min) * U(rng);
+    double c     = std::cos(theta);
+    double s     = std::sin(theta);
 
     // u=[1,0,0], v=[0,1,0], w=[0,0,1] in the clip frame
     // g = c*u + s*(cp*v + sp*w)
@@ -593,10 +606,10 @@ private:
     // g.z() unchanged
 
     // construct quaternion with theta and phi
-    const Eigen::AngleAxisd Rz_theta(theta + M_PI/2, Eigen::Vector3d::UnitZ());
-    const Eigen::AngleAxisd Rx_phi  (phi,   Eigen::Vector3d::UnitX());
+    Eigen::AngleAxisd Rz_theta(theta + M_PI/2, Eigen::Vector3d::UnitZ());
+    Eigen::AngleAxisd Rx_phi  (phi,   Eigen::Vector3d::UnitX());
     Eigen::Quaterniond quat_clip = Eigen::Quaterniond(Rx_phi) * Eigen::Quaterniond(Rz_theta); // Rx(phi)*Rz(theta)
-    // if (z_flip_pi) {
+    // if (clip_sign < 0) {
       quat_clip = Eigen::Quaterniond(Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ())) * quat_clip;  // Rz(pi) *
     // }
 
@@ -864,11 +877,15 @@ private:
   Eigen::Quaterniond lead_grasp_orientation_;
   Eigen::Quaterniond follow_grasp_orientation_;
   Eigen::Quaterniond transport_rotation_; // should be a constant during transport
+  Eigen::Isometry3d transport_transform_; // should be a constant during transport
 
   geometry_msgs::msg::PoseStamped lead_grasp_tcp_pose_clip_;
   geometry_msgs::msg::PoseStamped follow_grasp_tcp_pose_clip_;
   geometry_msgs::msg::PoseStamped lead_grasp_tcp_pose_world_;
   geometry_msgs::msg::PoseStamped follow_grasp_tcp_pose_world_;
+
+  geometry_msgs::msg::PoseStamped lead_reached_grasp_tcp_pose_world_;
+  geometry_msgs::msg::PoseStamped follow_reached_grasp_tcp_pose_world_;
 
   int follower_start_index_ = -1;
   int reversed_follower_start_index_ = -1;
