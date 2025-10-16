@@ -194,22 +194,22 @@ double DistanceToReference::operator()(const SubTrajectory& s, std::string& /*co
 	}
 }
 
-DirectionalManipulability::DirectionalManipulability(
-      std::map<std::string, std::string> group_ee,
-      geometry_msgs::msg::Vector3Stamped direction_vec,
-      Space space,                              // TRANSLATION or ROTATION
-      std::map<std::string,double> group_weights, // group-name -> weight (optional)
-      double epsilon,
-      Mode mode)
-    : group_ee_(std::move(group_ee))
-	, direction_vec_(std::move(direction_vec))
-	, dir_frame_(direction_vec_.header.frame_id)
-    , space_(space)
-    , group_weights_(std::move(group_weights))
-    , eps_(epsilon)
-    , mode_(mode) {	
-		dir_local_ = Eigen::Vector3d(direction_vec_.vector.x, direction_vec_.vector.y, direction_vec_.vector.z);
-	}
+// DirectionalManipulability::DirectionalManipulability(
+//       std::map<std::string, std::string> group_ee,
+//       geometry_msgs::msg::Vector3Stamped direction_vec,
+//       Space space,                              // TRANSLATION or ROTATION
+//       std::map<std::string,double> group_weights, // group-name -> weight (optional)
+//       double epsilon,
+//       Mode mode)
+//     : group_ee_(std::move(group_ee))
+// 	, direction_vec_(std::move(direction_vec))
+// 	, dir_frame_(direction_vec_.header.frame_id)
+//     , space_(space)
+//     , group_weights_(std::move(group_weights))
+//     , eps_(epsilon)
+//     , mode_(mode) {	
+// 		dir_local_ = Eigen::Vector3d(direction_vec_.vector.x, direction_vec_.vector.y, direction_vec_.vector.z);
+// 	}
 
 double DirectionalManipulability::operator()(const moveit::task_constructor::SubTrajectory& s, std::string& comment) const {
     const auto& traj  = s.trajectory();
@@ -282,7 +282,7 @@ double DirectionalManipulability::operator()(const moveit::task_constructor::Sub
 
       // Jacobian at EE origin (set a non-zero reference point if you need a TCP offset)
       Eigen::MatrixXd J; // 6 x N
-      state.getJacobian(jmg, link, Eigen::Vector3d::Zero(), J);
+      state.getJacobian(jmg, link, tcpOffsetEE(group), J);  // <<< CHANGED
       const Eigen::MatrixXd Js = (space_ == Space::TRANSLATION) ? J.topRows(3) : J.bottomRows(3);
 
       // m_dir = sqrt( u^T (Js Js^T) u )
@@ -340,6 +340,54 @@ double ManipulabilitySoftPenalty::operator()(const SubTrajectory& s,
     comment = oss.str();
     return weight_ * pen;
 }
+
+
+double ManipulabilityVolumeCost::operator()(const moveit::task_constructor::SubTrajectory& s,
+                                            std::string& comment) const {
+  const auto& traj = s.trajectory();
+  const auto* iface = s.end() ? s.end() : s.start();
+  if (!iface || !iface->scene()) { comment = "ManipVol: no state"; return 1e6; }
+
+  auto eval_one = [&](const moveit::core::RobotState& rs)->double {
+    double wsum=0.0, acc=0.0; size_t used=0;
+
+    for (const auto& [group, ee_link] : group_ee_) {
+      const auto* jmg  = rs.getJointModelGroup(group);
+      const auto* link = rs.getLinkModel(ee_link);
+      if (!jmg || !link) continue;
+
+      Eigen::MatrixXd J;  // 6xN at group-specific TCP
+      const Eigen::Vector3d tcp_off = tcpOffsetEE(group);
+      rs.getJacobian(jmg, link, tcp_off, J);
+
+      const Eigen::MatrixXd Jsub = translation_only_ ? J.topRows(3) : J;
+      const double logw = logManipulability(Jsub, lambda_);
+
+      const double w = groupWeight(group);
+      if (w > 0.0) { acc += w * logw; wsum += w; ++used; }
+    }
+
+    if (!used || wsum == 0.0) return 1e6;
+    const double mean_logw = acc / wsum;
+    const double cost = 1.0 / (std::exp(mean_logw - mu_) + 1e-3);  // smooth, bounded
+    return std::min(weight_ * cost, 1e4);
+  };
+
+  double out = 0.0;
+  if (traj && traj->getWayPointCount() > 0) {
+    double sum = 0.0;
+    for (size_t i=0; i<traj->getWayPointCount(); ++i)
+      sum += eval_one(traj->getWayPoint(i));
+    out = sum / static_cast<double>(traj->getWayPointCount());
+    comment = "ManipVol(avg)";
+  } else {
+    out = eval_one(iface->scene()->getCurrentState());
+    comment = "ManipVol(state)";
+  }
+  return out;
+}
+
+
 
 double WeightedSumCost::operator()(const moveit::task_constructor::SubTrajectory& s,
                     std::string& comment) const

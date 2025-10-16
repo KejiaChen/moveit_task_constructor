@@ -197,31 +197,54 @@ class DirectionalManipulability: public TrajectoryCostTerm
 {
 public:
   enum class Space { TRANSLATION, ROTATION };
-  /// direction_vec is expressed in direction_frame. If direction_frame=="world" it's used as-is.
   DirectionalManipulability(
-	std::map<std::string, std::string> group_ee,
-	geometry_msgs::msg::Vector3Stamped direction_vec,
-	Space space = Space::TRANSLATION,                              // TRANSLATION or ROTATION
-	std::map<std::string,double> group_weights = std::map<std::string,double>(), // group-name -> weight (optional)
-	double epsilon=1e-6,
-	Mode mode=Mode::AUTO);
+      std::map<std::string, std::string> group_ee,
+      geometry_msgs::msg::Vector3Stamped direction_vec,
+      Space space,
+      std::map<std::string,double> group_weights,
+      std::map<std::string, Eigen::Isometry3d> group_tcp_offsets,
+      double epsilon,
+      Mode mode)
+    : group_ee_(std::move(group_ee))
+    , direction_vec_(std::move(direction_vec))
+    , dir_frame_(direction_vec_.header.frame_id)
+    , space_(space)
+    , group_weights_(std::move(group_weights))
+    , default_tcp_offset_ee_(Eigen::Isometry3d::Identity())
+    , group_tcp_offsets_(std::move(group_tcp_offsets))
+    , eps_(epsilon)
+    , mode_(mode)
+  {
+    dir_local_ = Eigen::Vector3d(direction_vec_.vector.x, direction_vec_.vector.y, direction_vec_.vector.z);
+  }
 
   using TrajectoryCostTerm::operator();
   double operator()(const SubTrajectory& s, std::string& comment) const override;
 
-private:																		
-	double evalState(const moveit::core::RobotState& state_in, const Eigen::Vector3d& u_world) const;
+private:
+  double evalState(const moveit::core::RobotState& state_in, const Eigen::Vector3d& u_world) const;
 
-  std::map<std::string, std::string> group_ee_; // group-name -> end-effector link name
-  geometry_msgs::msg::Vector3Stamped direction_vec_; // direction in which manipulability is evaluated
-  std::string dir_frame_; // frame in which direction_vec is expressed
+  // Helper: fetch per-group offset, fallback to default, else zero
+  Eigen::Vector3d tcpOffsetEE(const std::string& group) const {
+    auto it = group_tcp_offsets_.find(group);
+    if (it != group_tcp_offsets_.end()) return it->second.translation();
+    return default_tcp_offset_ee_.translation();
+  }
+
+  std::map<std::string, std::string> group_ee_;
+  geometry_msgs::msg::Vector3Stamped direction_vec_;
+  std::string dir_frame_;
   Eigen::Vector3d dir_local_;
   Space space_;
-  std::map<std::string,double> group_weights_; // group-name -> weight
+  std::map<std::string,double> group_weights_;
   double eps_;
   Mode  mode_;
 
+  // NEW: TCP offsets
+  Eigen::Isometry3d default_tcp_offset_ee_;
+  std::map<std::string, Eigen::Isometry3d> group_tcp_offsets_;
 };
+
 
 // ---------- Helpers ----------
 inline double sigmaMinFullJ(const moveit::core::RobotState& rs,
@@ -273,6 +296,67 @@ private:
   bool hard_gate_;
   double weight_;
 };
+
+class ManipulabilityVolumeCost : public moveit::task_constructor::CostTerm
+{
+public:
+  ManipulabilityVolumeCost(std::map<std::string,std::string> group_ee,
+                           std::map<std::string,double> group_weights,
+                           bool translation_only,
+                           std::map<std::string, Eigen::Isometry3d> group_tcp_offsets,
+                           double lambda = 1e-4,
+                           double mu = 0.0,
+                           double weight = 1.0)
+  : group_ee_(std::move(group_ee))
+  , group_weights_(std::move(group_weights))
+  , translation_only_(translation_only)
+  , default_tcp_offset_ee_(Eigen::Isometry3d::Identity())
+  , group_tcp_offsets_(std::move(group_tcp_offsets))
+  , lambda_(lambda)
+  , mu_(mu)
+  , weight_(weight) {}
+
+  double operator()(const moveit::task_constructor::SubTrajectory& s,
+                    std::string& comment) const override;
+
+//   // Set/override a single group’s TCP offset later if needed
+//   void setTcpOffsetEE(const std::string& group, const Eigen::Vector3d& offset_ee) {
+//     group_tcp_offsets_[group] = offset_ee;
+//   }
+
+private:
+  static double logManipulability(const Eigen::MatrixXd& Jsub, double lambda) {
+    Eigen::JacobiSVD<Eigen::MatrixXd> svd(Jsub, Eigen::ComputeThinU|Eigen::ComputeThinV);
+    const auto& sv = svd.singularValues();
+    double acc = 0.0;
+    for (int i=0;i<sv.size();++i) acc += std::log(sv[i] + lambda);
+    return acc;
+  }
+
+  double groupWeight(const std::string& g) const {
+    if (group_weights_.empty()) return 1.0;
+    auto it = group_weights_.find(g);
+    return it==group_weights_.end() ? 0.0 : it->second;
+  }
+
+  // Helper: fetch per-group offset, fallback to default, else zero
+  Eigen::Vector3d tcpOffsetEE(const std::string& group) const {
+    auto it = group_tcp_offsets_.find(group);
+    if (it != group_tcp_offsets_.end()) return it->second.translation();
+    return default_tcp_offset_ee_.translation();
+  }
+
+  std::map<std::string,std::string> group_ee_;
+  std::map<std::string,double>      group_weights_;
+  bool translation_only_;
+
+  Eigen::Isometry3d default_tcp_offset_ee_;                       // fallback
+  std::map<std::string, Eigen::Isometry3d> group_tcp_offsets_; // overrides
+
+  double lambda_, mu_, weight_;
+};
+
+
 
 /* WeightedSumCost (combines any cost terms) */
 class WeightedSumCost : public moveit::task_constructor::CostTerm
