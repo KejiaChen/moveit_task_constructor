@@ -469,7 +469,8 @@ private:
                             double radius,
                             Eigen::Vector3d vec_in_world,
                             const std::string& attach_link, 
-                            std::vector<std::string> touch_links);
+                            std::vector<std::string> touch_links,
+                            bool enable_cable_collision);
 
   void detachCollisionCable(planning_scene::PlanningScenePtr scene,
                              const std::string& id);
@@ -601,17 +602,29 @@ private:
     //   = [ c,  s*cp,  s*sp ]
     Eigen::Vector3d g(c, s * cp, s * sp);
     // align with clip frame, rotate 180° about z (w): (x,y,z) -> (-x,-y,z)
-    g.x() = clip_sign * g.x();
-    g.y() = clip_sign * g.y();
+    if (clip_sign < 0) {
+      g.x() = -g.x();
+      g.y() = -g.y();
+    }else {
+      g.x() = -s * cp;
+      g.y() = c;
+    }
+    // g.x() = clip_sign * g.x();
+    // g.y() = clip_sign * g.y();
     // g.z() unchanged
 
     // construct quaternion with theta and phi
-    Eigen::AngleAxisd Rz_theta(theta + M_PI/2, Eigen::Vector3d::UnitZ());
+    if (clip_sign < 0) {
+      theta += M_PI/2; // flip about z
+    }else{
+      theta = theta;
+    }
+    Eigen::AngleAxisd Rz_theta(theta, Eigen::Vector3d::UnitZ());
     Eigen::AngleAxisd Rx_phi  (phi,   Eigen::Vector3d::UnitX());
     Eigen::Quaterniond quat_clip = Eigen::Quaterniond(Rx_phi) * Eigen::Quaterniond(Rz_theta); // Rx(phi)*Rz(theta)
-    // if (clip_sign < 0) {
+    if (clip_sign < 0) {
       quat_clip = Eigen::Quaterniond(Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ())) * quat_clip;  // Rz(pi) *
-    // }
+    }
 
     return {g.normalized(), quat_clip.normalized()};  // already unit, normalization is a safety net
   }
