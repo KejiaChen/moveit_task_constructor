@@ -483,7 +483,6 @@ private:
                                  const std::string& attach_link,
                                  const Eigen::Isometry3d& hand_to_tcp_transform,
                                  const std::vector<std::string>& touch_links,
-                                 rviz_visual_tools::RvizVisualTools& visual_tools,
                                  const rclcpp::Logger& LOGGER);
 
   void detachCollisionCableWorldAndRobot(planning_scene::PlanningScenePtr scene,

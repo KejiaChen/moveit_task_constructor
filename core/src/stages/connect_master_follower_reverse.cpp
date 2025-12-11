@@ -1238,7 +1238,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
     // Optional margin so the cylinder doesn't poke into geometry
     const double radius = 0.015;         // 4 mm cable
     const double end_margin = 2.0 * radius; // trim at both ends
-    double use_len = std::max(1e-3, full_len - 2.0 * end_margin);
+    double use_len = std::max(1e-3, full_len);
     Eigen::Vector3d dir_world_unit;
     if (full_len > 1e-9)
       dir_world_unit = dir_world / full_len;
@@ -1259,7 +1259,7 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
                                 leader_hand,
                                 lead_hand_to_tcp_transform_,    // leader hand→TCP
                                 leader_touch,
-                                visual_tools_, LOGGER);
+                                LOGGER);
 
     // Also allow collisions with the grasp fixture object (so cable doesn't collide with it)
     {
@@ -1271,7 +1271,19 @@ bool ConnectMFReverse::computeFirstArmTrajectoryReverse(robot_trajectory::RobotT
   // Now plan follower with the temporary attached cable in the scene
   for (const auto& pair : planner_) {
     if (pair.first == props.get<std::string>("follow_group")) {
-      planning_scene::PlanningSceneConstPtr start = pregrasp_scene;
+      // Start scene: same environment as temp_scene, but follower at pregrasp pose
+      planning_scene::PlanningScenePtr start_scene = temp_scene->diff();
+      std::vector<double> follower_start_positions;
+      {
+        // get follower start joints from pregrasp_scene (or current robot state)
+        const auto& pregrasp_state = pregrasp_scene->getCurrentState();
+        pregrasp_state.copyJointGroupPositions(follow_jmg_, follower_start_positions);
+      }
+      moveit::core::RobotState& start_state = start_scene->getCurrentStateNonConst();
+      start_state.setJointGroupPositions(follow_jmg_, follower_start_positions);
+      start_state.update(true);
+
+      planning_scene::PlanningSceneConstPtr start = start_scene;
       planning_scene::PlanningSceneConstPtr end   = temp_scene;
 
       auto result = pair.second->plan(start, end, follow_jmg_,
@@ -1555,12 +1567,11 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
     /*Planning target for arm*/
     planning_scene::PlanningScenePtr start_with_cable = start->diff();
     std::string object_id = "grasped_cable";
-    if (props.get<bool>("attach_transport_cable")){
-      // cable should be initially aligned with the vector pointing from the leader hand to the follower hand
-      attachCollisionCable(start_with_cable, object_id,  track_offset, 0.01,  cable_vector_in_world, "left_panda_hand", 
-                          {"left_panda_hand", "left_panda_leftfinger", "left_panda_rightfinger", "right_panda_hand", "right_panda_leftfinger", "right_panda_rightfinger"});
-      // intermediate_scenes.push_back(start_with_cable);
-    }
+    // cable should be initially aligned with the vector pointing from the leader hand to the follower hand
+    attachCollisionCable(start_with_cable, object_id,  track_offset, 0.01,  cable_vector_in_world, "left_panda_hand", 
+                        {"left_panda_hand", "left_panda_leftfinger", "left_panda_rightfinger", "right_panda_hand", "right_panda_leftfinger", "right_panda_rightfinger"},
+                        props.get<bool>("attach_transport_cable"));
+    // intermediate_scenes.push_back(start_with_cable);
     
     // cartesian planner is only to obtain grasp_scene
     planning_scene::PlanningScenePtr grasp_with_cable = start_with_cable->diff();
@@ -1669,10 +1680,8 @@ bool ConnectMFReverse::computeSecondArmTrajectoryReverse(const InterfaceState& f
       RCLCPP_WARN(LOGGER, "Arm trajectory is empty.");
     }
 
-    if (props.get<bool>("attach_transport_cable")){
-      // Detach the cable from the follower arm
-      detachCollisionCable(start_with_cable, object_id);
-    }
+    // Detach the cable from the follower arm
+    detachCollisionCable(start_with_cable, object_id);
 
   }
   
@@ -2189,7 +2198,8 @@ void ConnectMFReverse::attachCollisionCable(planning_scene::PlanningScenePtr sce
                                              double radius,
                                              Eigen::Vector3d vec_in_world,
                                              const std::string& attach_link, 
-                                             std::vector<std::string> touch_links)
+                                             std::vector<std::string> touch_links,
+                                             bool enable_cable_collision)
 {
     moveit_msgs::msg::AttachedCollisionObject attach_msg;
     attach_msg.link_name = attach_link;
@@ -2231,6 +2241,17 @@ void ConnectMFReverse::attachCollisionCable(planning_scene::PlanningScenePtr sce
 
     scene->processAttachedCollisionObjectMsg(attach_msg);
 
+    // add the object but disable cable collision if enable_cable_collision is false
+    if (!enable_cable_collision) {
+      collision_detection::AllowedCollisionMatrix& acm = scene->getAllowedCollisionMatrixNonConst();
+
+      bool allow = true;  // always allowed to collide
+
+      // Let dlo_obj collide with everything by default
+      acm.setDefaultEntry(id, allow);
+      acm.setEntry(id, allow);
+    }
+
     // visualization
     Eigen::Isometry3d pose_in_world = scene->getFrameTransform(attach_link) * cylinder_pose_in_hand;
     // Convert the pose to a geometry_msgs::Pose for visualization
@@ -2265,7 +2286,6 @@ void ConnectMFReverse::attachCollisionCableGeneric(planning_scene::PlanningScene
                                  const std::string& attach_link,
                                  const Eigen::Isometry3d& hand_to_tcp_transform,
                                  const std::vector<std::string>& touch_links,
-                                 rviz_visual_tools::RvizVisualTools& visual_tools,
                                  const rclcpp::Logger& LOGGER)
 {
   moveit_msgs::msg::AttachedCollisionObject attach_msg;
@@ -2303,8 +2323,8 @@ void ConnectMFReverse::attachCollisionCableGeneric(planning_scene::PlanningScene
   // viz (world pose)
   Eigen::Isometry3d pose_in_world = scene->getFrameTransform(attach_link) * cylinder_pose_in_hand;
   geometry_msgs::msg::Pose pose_msg_world = tf2::toMsg(pose_in_world);
-  visual_tools.publishCylinder(pose_msg_world, rviz_visual_tools::ORANGE, length, radius);
-  visual_tools.trigger();
+  visual_tools_.publishCylinder(pose_msg_world, rviz_visual_tools::BLUE, length, radius);
+  visual_tools_.trigger();
 
   RCLCPP_INFO_STREAM(LOGGER, "Attached temp cable '" << id << "' to " << attach_link
                         << " len=" << length << " r=" << radius);
