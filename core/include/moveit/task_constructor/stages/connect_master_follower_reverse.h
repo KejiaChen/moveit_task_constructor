@@ -315,6 +315,27 @@ inline double computeRotationDistanceIgnoreAxisVec(
   return w_perp.norm();
 }
 
+struct ArmRole {
+  std::string group;        // e.g., "panda_left_arm"
+  std::string hand_group;   // e.g., "panda_left_hand"
+  std::string base_link;
+  std::string hand_link;    // e.g., "left_panda_hand"
+
+  const moveit::core::JointModelGroup* arm_jmg{nullptr};
+  const moveit::core::JointModelGroup* hand_jmg{nullptr};
+
+  Eigen::Isometry3d hand_to_tcp_transform;
+  Eigen::Isometry3d flange_to_tcp_transform;
+
+  moveit_msgs::msg::Constraints path_constraints;
+
+  geometry_msgs::msg::PoseStamped grasp_tcp_pose_clip;
+  geometry_msgs::msg::PoseStamped grasp_tcp_pose_world;
+  Eigen::Quaterniond grasp_orientation;
+
+  double grasp_offset;
+};
+
 
 class ConnectMFReverse : public Connect
 {
@@ -352,6 +373,9 @@ public:
     setProperty("follow_path_constraints", std::move(path_constraints));
   }
 
+  ArmRole primary_role, secondary_role;
+  ArmRole leader_role, follower_role;
+
 protected:
   void compute(const InterfaceState& from, const InterfaceState& to) override;
 
@@ -364,25 +388,47 @@ private:
   //   double score;
   // };
 
-  bool computeSecondArmTrajectoryReverse(const InterfaceState& from, const InterfaceState& to,
+  bool computePrimaryArmTrajectoryReverse(const InterfaceState& from, const InterfaceState& to,
                                         robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                         planning_scene::PlanningScenePtr& intermediate_scene,
                                         planning_scene::PlanningScenePtr& final_scene,
                                         std::string& return_message); 
 
-  bool computeFirstArmTrajectoryReverse(robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
-                                        robot_trajectory::RobotTrajectoryPtr& follower_hand_trajectory,
-                                        std::vector<PlannerIdTrajectoryPair>& follower_trajectories,
-                                        planning_scene::PlanningSceneConstPtr& to_scene,
-                                        robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
-                                        std::vector<PlannerIdTrajectoryPair>& leader_trajectories,
-                                        // robot_trajectory::RobotTrajectoryPtr& dual_trajectory,
-                                        planning_scene::PlanningScenePtr& follow_intermediate_scene,
-                                        planning_scene::PlanningScenePtr& follow_final_scene,
-                                        std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
-                                        std::string& return_message);
- 
-  bool ExtractSecondArmCartesianTrajectory(const robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
+  // bool computeSecondaryArmTrajectoryReverse(robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
+  //                                       robot_trajectory::RobotTrajectoryPtr& follower_hand_trajectory,
+  //                                       std::vector<PlannerIdTrajectoryPair>& follower_trajectories,
+  //                                       planning_scene::PlanningSceneConstPtr& to_scene,
+  //                                       robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
+  //                                       std::vector<PlannerIdTrajectoryPair>& leader_trajectories,
+  //                                       // robot_trajectory::RobotTrajectoryPtr& dual_trajectory,
+  //                                       planning_scene::PlanningScenePtr& follow_intermediate_scene,
+  //                                       planning_scene::PlanningScenePtr& follow_final_scene,
+  //                                       std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
+  //                                       std::string& return_message);
+
+  bool computeSecondaryArmFixingToGraspReverse(robot_trajectory::RobotTrajectoryPtr& primary_trajectory,
+                                                  std::vector<PlannerIdTrajectoryPair>& primary_trajectories,
+                                                  planning_scene::PlanningSceneConstPtr& goal_scene,
+                                                  robot_trajectory::RobotTrajectoryPtr& secondary_trajectory,
+                                                  std::vector<PlannerIdTrajectoryPair>& secondary_trajectories,
+                                                  planning_scene::PlanningScenePtr& primary_intermediate_scene,
+                                                  planning_scene::PlanningScenePtr& primary_final_scene,
+                                                  std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
+                                                  planning_scene::PlanningScenePtr& phase_1_scene,     // <-- NEW: output grasp scene
+                                                  std::string& return_message);
+
+  bool computeDualGraspToCurrentTrajectoryReverse(robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
+                                                  robot_trajectory::RobotTrajectoryPtr& follower_hand_trajectory,
+                                                  std::vector<PlannerIdTrajectoryPair>& follower_trajectories,
+                                                  planning_scene::PlanningSceneConstPtr& goal_scene,
+                                                  robot_trajectory::RobotTrajectoryPtr& leader_trajectory,
+                                                  std::vector<PlannerIdTrajectoryPair>& leader_trajectories,
+                                                  // robot_trajectory::RobotTrajectoryPtr& dual_trajectory,
+                                                  std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
+                                                  planning_scene::PlanningScenePtr& phase_1_scene,
+                                                  std::string& return_message);
+  
+  bool ExtractPrimaryArmCartesianTrajectory(const robot_trajectory::RobotTrajectoryPtr& follower_trajectory,
                                             const moveit::core::RobotState& final_goal_state,
                                             std::vector<geometry_msgs::msg::Pose>& follower_tip_path,
                                             std::vector<double>& path_time,
@@ -392,7 +438,7 @@ private:
                                             robot_trajectory::RobotTrajectoryPtr& follower_track_trajectory,
                                             bool reverse=false);
   
-  double FirstArmFollow(planning_scene::PlanningScenePtr& intermediate_scene,
+  double SecondaryArmFollow(planning_scene::PlanningScenePtr& intermediate_scene,
                         std::vector<geometry_msgs::msg::Pose> leader_tip_path,
                         robot_trajectory::RobotTrajectoryPtr& lead_trajectory);
 
@@ -414,11 +460,13 @@ private:
                             const moveit::core::RobotState& dual_state,
                             moveit::core::RobotState& single_group_state);
 
-  void updateDualIntermediateState(const moveit::core::RobotState& leader_state,
-                                    const moveit::core::RobotState& follower_state,
+  void updateDualIntermediateState(const moveit::core::RobotState& first_state,
+                                    ArmRole& first_role,
+                                    const moveit::core::RobotState& second_state,
+                                    ArmRole& second_role,
                                     planning_scene::PlanningScenePtr& start,
                                     planning_scene::PlanningScenePtr& end);
-  
+
   bool isTargetPoseCollidingInEEF(const planning_scene::PlanningSceneConstPtr& scene,
                                   moveit::core::RobotState& robot_state, 
                                   EigenSTL::vector_Isometry3d& poses,
@@ -895,12 +943,13 @@ private:
   geometry_msgs::msg::PoseStamped follow_grasp_tcp_pose_clip_;
   geometry_msgs::msg::PoseStamped lead_grasp_tcp_pose_world_;
   geometry_msgs::msg::PoseStamped follow_grasp_tcp_pose_world_;
+  geometry_msgs::msg::PoseStamped grasp_origin_clip_world_;
 
   geometry_msgs::msg::PoseStamped lead_reached_grasp_tcp_pose_world_;
   geometry_msgs::msg::PoseStamped follow_reached_grasp_tcp_pose_world_;
 
-  int follower_start_index_ = -1;
-  int reversed_follower_start_index_ = -1;
+  int primary_start_index_ = -1;
+  int reversed_primary_start_index_ = -1;
   int follower_grasp_index_ = -1;
 };
 }  // namespace stages
