@@ -115,8 +115,10 @@ private:
                                 robot_trajectory::RobotTrajectoryPtr& follower_trajectory);
 
   SubTrajectoryPtr mergeIgnoreCollision(const std::vector<PlannerIdTrajectoryPair>& sub_trajectories,
-                                  // const std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
-                                  const moveit::core::RobotState& state);
+                                        // const std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
+                                        planning_scene::PlanningSceneConstPtr intermediate_scene,
+                                        //   const moveit::core::RobotState& state
+                                        bool collision_check=true);
   
   bool splitTrajectoryWithPause(const robot_trajectory::RobotTrajectoryPtr& trajectory,
                                 const double pause_duration,
@@ -136,6 +138,15 @@ private:
                                     const moveit::core::RobotState& follower_state,
                                     planning_scene::PlanningScenePtr& start,
                                     planning_scene::PlanningScenePtr& end);
+
+  moveit_msgs::msg::PositionConstraint generateTightPositionConstraint(const std::string& link_name,
+                                                                                    const Eigen::Vector3d& target_position,
+                                                                                    const Eigen::Vector3d& current_position,
+                                                                                    double tolerance_xyz = 1e-2);
+
+  moveit_msgs::msg::OrientationConstraint generateTightOrientationConstraint(const std::string& link_name,
+                                                                            const Eigen::Quaterniond& target_orientation,
+                                                                            double tolerance_angle = 1e-2);
 
   const moveit::core::JointModelGroup* follow_jmg_;
   const moveit::core::JointModelGroup* leader_jmg_;
