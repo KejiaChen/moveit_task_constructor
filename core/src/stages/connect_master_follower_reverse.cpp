@@ -130,7 +130,7 @@ ConnectMFReverse::ConnectMFReverse(const std::string& name, const GroupPlannerVe
     p.declare<Eigen::Isometry3d>("lead_flange_to_tcp_transform", default_flange_to_tcp_transform, "transform from lead flange (panda_link8) to TCP");
     p.declare<Eigen::Isometry3d>("follow_flange_to_tcp_transform", default_flange_to_tcp_transform, "transform from follow flange (panda_link8) to TCP");
     p.declare<std::vector<double>>("grasp_clip_size", {0.04, 0.04, 0.06}, "size of the grasping clip");
-    p.declare<bool>("primary_is_leader", true, "whether the primary arm is the leader");
+    p.declare<bool>("primary_is_leader", false, "whether the primary arm is the leader");
 }
 
 void ConnectMFReverse::init(const core::RobotModelConstPtr& robot_model) {
@@ -265,7 +265,7 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
     /**********************************************Primary and Secondary ******************************************** */
 
     planning_scene::PlanningScenePtr primary_intermediate_scene = from_scene->diff();
-    planning_scene::PlanningScenePtr primary_final_scene = from_scene->diff();
+    // planning_scene::PlanningScenePtr primary_final_scene = from_scene->diff();
     robot_trajectory::RobotTrajectoryPtr reversed_secondary_trajectory;
     robot_trajectory::RobotTrajectoryPtr reversed_primary_trajectory;
 
@@ -276,7 +276,8 @@ void ConnectMFReverse::compute(const InterfaceState& from, const InterfaceState&
     /** Step 1: Compute trajectory for the primary arm */
     std::string primary_arm_plan_msg = "";
     if (!computePrimaryArmTrajectoryReverse(from, to, reversed_primary_trajectory, 
-                                          primary_intermediate_scene, primary_final_scene,
+                                          primary_intermediate_scene, 
+                                          // primary_final_scene,
                                           primary_arm_plan_msg)) 
     {   
         SubTrajectoryPtr failed_solution;
@@ -1343,8 +1344,8 @@ void ConnectMFReverse::updateDualIntermediateState(const moveit::core::RobotStat
 
 bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& from, const InterfaceState& to,
                                                         robot_trajectory::RobotTrajectoryPtr& primary_trajectory,
-                                                        planning_scene::PlanningScenePtr& intermediate_scene,
-                                                        planning_scene::PlanningScenePtr& final_scene,
+                                                        planning_scene::PlanningScenePtr& primary_intermediate_scene,
+                                                        // planning_scene::PlanningScenePtr& final_scene,
                                                         std::string& return_message) 
 {
   const auto& props = properties();
@@ -1356,7 +1357,8 @@ bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& 
 
   const moveit::core::RobotState& start_state = to.scene()->getCurrentState(); // reverse direction
   const moveit::core::RobotState& final_state = from.scene()->getCurrentState();
-  planning_scene::PlanningScenePtr start = to.scene()->diff();
+  planning_scene::PlanningScenePtr start_canonical = to.scene()->diff(); // secondary stays at to.scene()
+  planning_scene::PlanningScenePtr start_for_primary = to.scene()->diff(); // used only for primary planning
 
   /* Option 2: Passing intermediate waypoint*/
   
@@ -1379,11 +1381,11 @@ bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& 
   Eigen::Isometry3d secondary_grasp_pose_tcp, secondary_grasp_pose_eef;
   getGraspEEPose(secondary_role, secondary_grasp_pose_tcp, secondary_grasp_pose_eef);
 
-  // temporary: set secondary arm to from.scene() state in start scene
+  // temporary: set secondary arm to from.scene() state in start_for_primary scene
   if (props.get<bool>("primary_is_leader")) {
-    moveit::core::RobotState& s = start->getCurrentStateNonConst();
+    moveit::core::RobotState& s = start_for_primary->getCurrentStateNonConst();
 
-    // Copy secondary arm joints from from.scene() into start scene
+    // Copy secondary arm joints from from.scene() into start_for_primary scene
     std::vector<double> q_arm;
     from.scene()->getCurrentState().copyJointGroupPositions(secondary_role.arm_jmg, q_arm);
     s.setJointGroupPositions(secondary_role.arm_jmg, q_arm);
@@ -1396,13 +1398,12 @@ bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& 
     s.update(true);
 
     RCLCPP_INFO_STREAM(LOGGER,
-      "Leader-first: set secondary '" << secondary_role.group
-      << "' to from.scene() state in start scene.");
+      "Leader-first: set secondary '" << secondary_role.group   << "' to from.scene() state in start_for_primary scene.");
   }
 
   // TODO@KejiaChen: check if the target pose is valid
-  
-  primary_trajectory.reset(new robot_trajectory::RobotTrajectory(start->getRobotModel(), primary_role.arm_jmg));
+
+  primary_trajectory.reset(new robot_trajectory::RobotTrajectory(start_for_primary->getRobotModel(), primary_role.arm_jmg));
 
   // get finger joint positions of start and final state
   // std::vector<double> start_finger_positions;
@@ -1426,10 +1427,10 @@ bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& 
   //   // traj_1 = traj_cartesian;
   //   RCLCPP_INFO_STREAM(LOGGER, "Cable collision not considered.");
   // }else
-  {
+  // {
     /*Planning target for arm*/
     robot_trajectory::RobotTrajectoryPtr traj_1;
-    planning_scene::PlanningScenePtr start_with_cable = start->diff();
+    planning_scene::PlanningScenePtr start_with_cable = start_for_primary->diff();
     std::string object_id = "grasped_cable";
     // cable should be initially aligned with the vector pointing from the leader hand to the follower hand
     attachCollisionCable(start_with_cable, object_id, track_offset, 0.01, cable_vector_in_world, primary_role.hand_link,
@@ -1455,13 +1456,13 @@ bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& 
     // state.setJointGroupPositions(primary_role.arm_jmg, seed);
     bool success = grasp_state.setFromIK(primary_role.arm_jmg, target_pose, primary_role.hand_link, props.get<double>("timeout"));
     if (!success) {
-      return_message = "Follower arm grasp pose set from IK failed.";
+      return_message = "Primary arm grasp pose set from IK failed.";
       RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
       return false;
     }
     std::vector<double> intermediate_arm_positions;
     grasp_state.copyJointGroupPositions(primary_role.arm_jmg, intermediate_arm_positions);
-    RCLCPP_INFO_STREAM(LOGGER, "Follower arm grasp joint position: " << intermediate_arm_positions[0] << " " << intermediate_arm_positions[1] << " " << intermediate_arm_positions[2] << " "
+    RCLCPP_INFO_STREAM(LOGGER, "Primary arm grasp joint position: " << intermediate_arm_positions[0] << " " << intermediate_arm_positions[1] << " " << intermediate_arm_positions[2] << " "
                                             << intermediate_arm_positions[3] << " " << intermediate_arm_positions[4] << " " << intermediate_arm_positions[5] << " "
                                             << intermediate_arm_positions[6]);
     grasp_state.update();
@@ -1510,8 +1511,10 @@ bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& 
       }
     }
 
+    planning_scene::PlanningScenePtr intermediate_scene;
     if (!traj_1->empty()) {
-      intermediate_scene = start->diff();
+      // intermediate scene for planning
+      intermediate_scene = start_for_primary->diff();
       moveit::core::RobotState& intermediate_state = intermediate_scene->getCurrentStateNonConst();
       // update arm state
       const moveit::core::RobotState& traj1_final_state = traj_1->getLastWayPoint();
@@ -1519,6 +1522,13 @@ bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& 
       traj1_final_state.copyJointGroupPositions(primary_role.arm_jmg, intermediate_arm_positions);
       intermediate_state.setJointGroupPositions(primary_role.arm_jmg, intermediate_arm_positions);
       intermediate_state.update();
+
+      // intermediate scene as interface
+      primary_intermediate_scene = start_canonical->diff();
+      moveit::core::RobotState& primary_intermediate_state = primary_intermediate_scene->getCurrentStateNonConst();
+      // update arm state
+      primary_intermediate_state.setJointGroupPositions(primary_role.arm_jmg, intermediate_arm_positions);
+      primary_intermediate_state.update();
 
       primary_trajectory->append(*traj_1, 0.1);
       primary_start_index_ = primary_trajectory->getWayPointCount();
@@ -1548,11 +1558,11 @@ bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& 
     // Detach the cable from the primary arm
     detachCollisionCable(start_with_cable, object_id);
 
-  }
+  // }
   
   // ---- Step 2: Plan from grasping to start ----
   robot_trajectory::RobotTrajectoryPtr traj_2;
-  robot_trajectory::RobotTrajectoryPtr traj_ompl_2(new robot_trajectory::RobotTrajectory(start->getRobotModel(), primary_role.arm_jmg));
+  robot_trajectory::RobotTrajectoryPtr traj_ompl_2(new robot_trajectory::RobotTrajectory(start_for_primary->getRobotModel(), primary_role.arm_jmg));
   // update the intermediate scene with the primary hand's goal state
   planning_scene::PlanningScenePtr pregrasp_scene = intermediate_scene->diff();
   moveit::core::RobotState& pregrasp_state = pregrasp_scene->getCurrentStateNonConst();
@@ -1561,9 +1571,10 @@ bool ConnectMFReverse::computePrimaryArmTrajectoryReverse(const InterfaceState& 
   pregrasp_state.setJointGroupPositions(primary_role.hand_jmg, intermediate_hand_positions);
   pregrasp_state.update();
 
+  planning_scene::PlanningScenePtr final_scene;
   for (const auto& pair : planner_) {
     if (pair.first == primary_role.group) {
-      final_scene = start->diff();
+      final_scene = start_canonical->diff();
       moveit::core::RobotState& goal_state = final_scene->getCurrentStateNonConst();
       std::vector<double> goal_arm_positions;
       final_state.copyJointGroupPositions(primary_role.arm_jmg, goal_arm_positions);
