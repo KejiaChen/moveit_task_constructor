@@ -408,11 +408,11 @@ private:
 
   bool computeSecondaryArmFixingToGraspReverse(robot_trajectory::RobotTrajectoryPtr& primary_trajectory,
                                                   std::vector<PlannerIdTrajectoryPair>& primary_trajectories,
+                                                  planning_scene::PlanningSceneConstPtr& start_scene,
                                                   planning_scene::PlanningSceneConstPtr& goal_scene,
                                                   robot_trajectory::RobotTrajectoryPtr& secondary_trajectory,
                                                   std::vector<PlannerIdTrajectoryPair>& secondary_trajectories,
                                                   planning_scene::PlanningScenePtr& primary_intermediate_scene,
-                                                  planning_scene::PlanningScenePtr& primary_final_scene,
                                                   std::vector<planning_scene::PlanningSceneConstPtr>& intermediate_scenes,
                                                   planning_scene::PlanningScenePtr& phase_1_scene,     // <-- NEW: output grasp scene
                                                   std::string& return_message);
@@ -441,6 +441,11 @@ private:
   double SecondaryArmFollow(planning_scene::PlanningScenePtr& intermediate_scene,
                         std::vector<geometry_msgs::msg::Pose> leader_tip_path,
                         robot_trajectory::RobotTrajectoryPtr& lead_trajectory);
+
+  double SecondaryArmFollowOnline(planning_scene::PlanningScenePtr& scene,
+                                  const robot_trajectory::RobotTrajectoryPtr& primary_track_trajectory,
+                                  const std::vector<geometry_msgs::msg::Pose>& secondary_tip_path,
+                                  robot_trajectory::RobotTrajectoryPtr& secondary_trajectory);
 
   SubTrajectoryPtr mergeIgnoreCollision(const std::vector<PlannerIdTrajectoryPair>& sub_trajectories,
                                   const planning_scene::PlanningSceneConstPtr& intermediate_scene,
@@ -921,7 +926,117 @@ private:
       markers.push_back(std::move(t));
     }
   }
-  
+
+  void getGraspEEPose(ArmRole& role, 
+                      Eigen::Isometry3d& grasp_pose_tcp,
+                      Eigen::Isometry3d& grasp_pose_eef)
+  {
+    // Option 1: Get the grasp_pose in world frame as target
+    // geometry_msgs::msg::PoseStamped follower_grasp_pos_msg = props.get<geometry_msgs::msg::PoseStamped>("follow_grasp_pose");
+    geometry_msgs::msg::PoseStamped grasp_pos_msg =  role.grasp_tcp_pose_world;
+    tf2::fromMsg(grasp_pos_msg.pose, grasp_pose_tcp);
+    Eigen::Quaterniond grasp_orientation(grasp_pose_tcp.rotation());
+
+    // follower should have the same rotation to leader at grasping and at at the start
+    grasp_pose_tcp.linear() = role.grasp_orientation.toRotationMatrix();
+    grasp_pose_eef = grasp_pose_tcp * (role.hand_to_tcp_transform.inverse());
+
+    // Archive
+    // robot_trajectory::RobotTrajectoryPtr traj_1;
+    // robot_trajectory::RobotTrajectoryPtr traj_cartesian;
+    // for (const auto& pair: cartesian_planner_) {
+    // // for (const auto& pair: planner_) {
+    //   if (pair.first == primary_role.group) {
+
+    //     // follow_jmg_ = final_state.getJointModelGroup(pair.first);
+
+    //     const moveit::core::RobotState& start_state = start->getCurrentState();
+
+    //     // Get current pose of EEF in world frame
+    //     Eigen::Isometry3d current_pose = start_state.getGlobalLinkTransform(eef_link);
+    //     Eigen::Quaterniond clip_orientation(current_pose.rotation());
+    //     RCLCPP_INFO_STREAM(LOGGER, "Primary arm current position: " << current_pose.translation().transpose());
+    //     RCLCPP_INFO_STREAM(LOGGER, "Primary arm current orientation: " << clip_orientation.coeffs().transpose());
+
+    //     // Option 1: Get the primary_grasp_pose in world frame as target
+    //     // geometry_msgs::msg::PoseStamped follower_grasp_pos_msg = props.get<geometry_msgs::msg::PoseStamped>("follow_grasp_pose");
+    //     geometry_msgs::msg::PoseStamped primary_grasp_pos_msg =  primary_role.grasp_tcp_pose_world;
+    //     tf2::fromMsg(primary_grasp_pos_msg.pose, primary_grasp_pose_tcp);
+    //     Eigen::Quaterniond grasp_orientation(primary_grasp_pose_tcp.rotation());
+        
+    //     // Eigen::Quaterniond combined_orientation = combineRotations(grasp_orientation, clip_orientation);
+    //     // primary_grasp_pose_tcp.linear() = combined_orientation.toRotationMatrix();
+    //     // follower should have the same rotation to leader at grasping and at at the start
+    //     primary_grasp_pose_tcp.linear() = primary_role.grasp_orientation.toRotationMatrix();
+    //     Eigen::Isometry3d primary_grasp_pose_eef = primary_grasp_pose_tcp * (primary_role.hand_to_tcp_transform.inverse());
+
+    //     target_pose = primary_grasp_pose_eef;
+    //     Eigen::Quaterniond target_orientation(target_pose.rotation());
+        
+    //     // // Option 2: Get the primary_grasp_pose in EEF frame as target
+    //     // // Apply local +X offset
+    //     // Eigen::Isometry3d target_pose = current_pose * Eigen::Translation3d(grasp_follower_offset, 0.0, 0.0);
+
+    //     // TODO@KejiaChen: check if the target pose is valid
+        
+    //     RCLCPP_INFO_STREAM(LOGGER, "Primary arm grasp position: " << target_pose.translation().transpose());
+    //     RCLCPP_INFO_STREAM(LOGGER, "Primary arm grasp orientation: " << target_orientation.coeffs().transpose());
+
+    //     // auto result_cartesian = pair.second->plan(start, *eef_link, offset, target_pose, primary_role.arm_jmg,
+    //     //                                 props.get<double>("timeout"), traj_cartesian, path_constraints);
+
+    //     // if (!result_cartesian) {
+    //     //   return_message = "Follower arm planning to grasp pose with cartesian planner failed.";
+    //     //   RCLCPP_ERROR(LOGGER, "%s", return_message.c_str());
+    //     //   return false;
+    //     // }
+        
+    //   }
+    // }
+
+  }
+
+  static bool computeGraspIKSeeded(const planning_scene::PlanningSceneConstPtr& scene,          // the "fixing" scene (to.scene())
+                                  const ArmRole& role,                                         // secondary_role (follower when leader-first)
+                                  const Eigen::Isometry3d& target_eef_pose_world,              // desired EEF pose (not TCP)
+                                  std::vector<double>& out_joint_positions,                    // result
+                                  double timeout,
+                                  rclcpp::Logger logger)
+  {
+    const auto& robot_model = scene->getRobotModel();
+    moveit::core::RobotState seed_state(scene->getCurrentState()); // copy
+    const auto* jmg = role.arm_jmg;
+    if (!jmg) {
+      RCLCPP_ERROR(logger, "computeGraspIKSeeded: role.arm_jmg is null for group '%s'", role.group.c_str());
+      return false;
+    }
+
+    // Seed with the current (fixing) joint positions from the scene
+    std::vector<double> seed_q;
+    scene->getCurrentState().copyJointGroupPositions(jmg, seed_q);
+    seed_state.setJointGroupPositions(jmg, seed_q);
+    seed_state.update();
+
+    // Solve IK
+    // Note: link name should be the EEF link used by IK solver, usually the hand link.
+    // If your solver expects a different link (flange), adjust accordingly.
+    const std::string& ik_link = role.hand_link;
+
+    bool ok = seed_state.setFromIK(
+        jmg,
+        target_eef_pose_world,
+        ik_link,
+        timeout);
+
+    if (!ok) {
+      RCLCPP_WARN(logger, "IK failed for group '%s' to reach grasp EEF pose.", role.group.c_str());
+      return false;
+    }
+
+    seed_state.copyJointGroupPositions(jmg, out_joint_positions);
+    return true;
+  }
+
   const moveit::core::JointModelGroup* follow_jmg_;
   const moveit::core::JointModelGroup* follow_hand_jmg_;
   const moveit::core::JointModelGroup* leader_jmg_;
@@ -947,6 +1062,8 @@ private:
 
   geometry_msgs::msg::PoseStamped lead_reached_grasp_tcp_pose_world_;
   geometry_msgs::msg::PoseStamped follow_reached_grasp_tcp_pose_world_;
+
+  std::vector<double> start_finger_positions_;
 
   int primary_start_index_ = -1;
   int reversed_primary_start_index_ = -1;
