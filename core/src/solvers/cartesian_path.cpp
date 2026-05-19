@@ -88,7 +88,7 @@ PlannerInterface::Result CartesianPath::plan(const planning_scene::PlanningScene
 	Eigen::Isometry3d ik_pose_world;
 
 	if (!utils::getRobotTipForFrame(props.property("ik_frame"), *from, jmg, error_msg, link, ik_pose_world))
-		return { false, "CartesianPath: " + error_msg };
+		return { false, error_msg };
 
 	Eigen::Isometry3d offset = from->getCurrentState().getGlobalLinkTransform(link).inverse() * ik_pose_world;
 
@@ -135,7 +135,50 @@ PlannerInterface::Result CartesianPath::plan(const planning_scene::PlanningScene
 		                          props.get<double>("max_acceleration_scaling_factor"));
 
 	if (achieved_fraction < props.get<double>("min_fraction")) {
-		return { false, "CartesianPath: min_fraction not met. Achieved: " + std::to_string(achieved_fraction) };
+		return { false, "min_fraction not met. Achieved: " + std::to_string(achieved_fraction) };
+	}
+	return { true, "achieved fraction: " + std::to_string(achieved_fraction) };
+}
+
+PlannerInterface::Result CartesianPath::plan_waypoints(const planning_scene::PlanningSceneConstPtr& from,
+													const moveit::core::LinkModel& link, const Eigen::Isometry3d& offset,
+													const EigenSTL::vector_Isometry3d& waypoints, const moveit::core::JointModelGroup* jmg,
+													double /*timeout*/, robot_trajectory::RobotTrajectoryPtr& result,
+													const moveit_msgs::msg::Constraints& path_constraints) {
+	const auto& props = properties();
+	planning_scene::PlanningScenePtr sandbox_scene = from->diff();
+
+	kinematic_constraints::KinematicConstraintSet kcs(sandbox_scene->getRobotModel());
+	kcs.add(path_constraints, sandbox_scene->getTransforms());
+
+	auto is_valid = [&sandbox_scene, &kcs](moveit::core::RobotState* state, const moveit::core::JointModelGroup* jmg,
+	                                       const double* joint_positions) {
+		state->setJointGroupPositions(jmg, joint_positions);
+		state->update();
+		return !sandbox_scene->isStateColliding(const_cast<const moveit::core::RobotState&>(*state), jmg->getName()) &&
+		       kcs.decide(*state).satisfied;
+	};
+
+	std::vector<moveit::core::RobotStatePtr> trajectory;
+	double achieved_fraction = moveit::core::CartesianInterpolator::computeCartesianPath(
+	    &(sandbox_scene->getCurrentStateNonConst()), jmg, trajectory, &link, waypoints, true,
+	    moveit::core::MaxEEFStep(props.get<double>("step_size")),
+	    moveit::core::JumpThreshold(props.get<double>("jump_threshold")), is_valid,
+	    props.get<kinematics::KinematicsQueryOptions>("kinematics_options"),
+	    props.get<kinematics::KinematicsBase::IKCostFn>("kinematics_cost_fn"), offset);
+
+	assert(!trajectory.empty());  // there should be at least the start state
+	result = std::make_shared<robot_trajectory::RobotTrajectory>(sandbox_scene->getRobotModel(), jmg);
+	for (const auto& waypoint : trajectory)
+		result->addSuffixWayPoint(waypoint, 0.0);
+
+	auto timing = props.get<TimeParameterizationPtr>("time_parameterization");
+	if (timing)
+		timing->computeTimeStamps(*result, props.get<double>("max_velocity_scaling_factor"),
+		                          props.get<double>("max_acceleration_scaling_factor"));
+
+	if (achieved_fraction < props.get<double>("min_fraction")) {
+		return { false, "min_fraction not met. Achieved: " + std::to_string(achieved_fraction) };
 	}
 	return { true, "achieved fraction: " + std::to_string(achieved_fraction) };
 }

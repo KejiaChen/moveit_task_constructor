@@ -39,6 +39,7 @@
 #pragma once
 
 #include <moveit/task_constructor/solvers/planner_interface.h>
+#include <moveit/robot_state/robot_state.h>
 
 namespace moveit {
 namespace task_constructor {
@@ -46,7 +47,7 @@ namespace solvers {
 
 MOVEIT_CLASS_FORWARD(CartesianPath);
 
-/** Use MoveIt's computeCartesianPath() to generate a straigh-line path between to scenes */
+/** Use MoveIt's computeCartesianPath() to generate a straigh-line path between two scenes */
 class CartesianPath : public PlannerInterface
 {
 public:
@@ -75,6 +76,11 @@ public:
 	            const Eigen::Isometry3d& offset, const Eigen::Isometry3d& target,
 	            const moveit::core::JointModelGroup* jmg, double timeout, robot_trajectory::RobotTrajectoryPtr& result,
 	            const moveit_msgs::msg::Constraints& path_constraints = moveit_msgs::msg::Constraints()) override;
+	
+	Result plan_waypoints(const planning_scene::PlanningSceneConstPtr& from, const moveit::core::LinkModel& link,
+	            const Eigen::Isometry3d& offset, const EigenSTL::vector_Isometry3d& waypoints,
+	            const moveit::core::JointModelGroup* jmg, double timeout, robot_trajectory::RobotTrajectoryPtr& result,
+	            const moveit_msgs::msg::Constraints& path_constraints = moveit_msgs::msg::Constraints());
 
 	std::string getPlannerId() const override { return "CartesianPath"; }
 };

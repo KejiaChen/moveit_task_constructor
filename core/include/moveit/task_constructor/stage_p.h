@@ -154,7 +154,10 @@ public:
 
 	bool storeSolution(const SolutionBasePtr& solution, const InterfaceState* from, const InterfaceState* to);
 	void newSolution(const SolutionBasePtr& solution);
-	bool storeFailures() const { return introspection_ != nullptr; }
+	bool storeFailures() const { 
+									// return introspection_ != nullptr; 
+									return true;
+								}
 	void runCompute() {
 		RCLCPP_DEBUG_STREAM(LOGGER, fmt::format("Computing stage '{}'", name()));
 

@@ -166,7 +166,7 @@ merge(const std::vector<robot_trajectory::RobotTrajectoryConstPtr>& sub_trajecto
 	}
 
 	// add timing
-	time_parameterization.computeTimeStamps(*merged_traj, 1.0, 1.0);
+	time_parameterization.computeTimeStamps(*merged_traj, 0.3, 0.3);
 	return merged_traj;
 }
 }  // namespace task_constructor

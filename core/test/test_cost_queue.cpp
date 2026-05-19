@@ -126,7 +126,7 @@ TYPED_TEST(OrderedTest, sorting) {
 template <typename ValueType, typename CostType>
 std::ostream& operator<<(std::ostream& os, const cost_ordered<ValueType, CostType>& queue) {
 	for (const auto& pair : queue.sorted())
-		os << pair.cost() << ": " << pair.value() << '\n';
+		os << pair.cost() << ": " << pair.value() << std::endl;
 	return os;
 }
 

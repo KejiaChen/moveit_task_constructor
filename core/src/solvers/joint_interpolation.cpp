@@ -138,6 +138,14 @@ PlannerInterface::Result JointInterpolationPlanner::plan(const planning_scene::P
 
 	auto to{ from->diff() };
 
+	// check constraints
+	if (path_constraints.position_constraints.empty() && path_constraints.orientation_constraints.empty()){
+		RCLCPP_WARN(LOGGER, "No path constraints specified for joint interpolation planner!");
+	}else{
+		RCLCPP_INFO_STREAM(LOGGER, "Path constraints specified for joint interpolation planner");
+	}
+	
+
 	kinematic_constraints::KinematicConstraintSet constraints{ to->getRobotModel() };
 	constraints.add(path_constraints, from->getTransforms());
 

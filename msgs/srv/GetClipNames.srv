@@ -1,0 +1,5 @@
+# Request
+string[] clip_names
+---
+# Response
+bool success

@@ -41,6 +41,8 @@
 #include <moveit/task_constructor/storage.h>
 #include <moveit/task_constructor/utils.h>
 #include <moveit_msgs/msg/robot_state.h>
+#include <moveit/robot_state/robot_state.h>
+#include <geometry_msgs/msg/vector3_stamped.hpp>
 
 namespace moveit {
 namespace task_constructor {
@@ -70,7 +72,7 @@ public:
 class TrajectoryCostTerm : public CostTerm
 {
 public:
-	enum class Mode : uint8_t
+	enum class Mode
 	{
 		AUTO /* TRAJECTORY, or START_INTERFACE if no trajectory is given */,
 		START_INTERFACE,
@@ -140,6 +142,47 @@ public:
 	std::map<std::string, double> joints;  //< joint weights
 };
 
+/**
+ * @brief Joint-space Riemannian path cost
+ *
+ * Cost = sum_k (Δq_k)^T M (Δq_k),
+ * with M encoded as per-joint weights (diagonal metric).
+ *
+ * If no joint weights are provided, falls back to squaring the
+ * default joint distance metric between waypoints.
+ */
+class JointRiemannianCost : public TrajectoryCostTerm
+{
+public:
+  JointRiemannianCost() = default;
+
+  /// Construct from (joint_name -> weight) map
+  explicit JointRiemannianCost(const std::map<std::string, double>& joint_weights)
+    : joint_weights_(joint_weights)
+  {}
+
+  /// Set or override a single joint's weight
+  void setJointWeight(const std::string& joint_name, double weight) {
+    joint_weights_[joint_name] = weight;
+  }
+
+  /// Replace the full joint-weight map
+  void setJointWeights(const std::map<std::string, double>& joint_weights) {
+    joint_weights_ = joint_weights;
+  }
+
+  /// Access current joint weights
+  const std::map<std::string, double>& jointWeights() const { return joint_weights_; }
+
+  /// MTC entry point: evaluate cost over a SubTrajectory
+  double operator()(const SubTrajectory& s, std::string& comment) const override;
+
+private:
+  // diagonal metric: joint_name -> weight (>= 0)
+  std::map<std::string, double> joint_weights_;
+};
+
+
 /// (weighted) joint-space distance to reference pose
 class DistanceToReference : public TrajectoryCostTerm
 {
@@ -165,7 +208,7 @@ public:
 	double operator()(const SubTrajectory& s, std::string& comment) const override;
 };
 
-/** length of Cartesian trajection of a link */
+/** length of Cartesian trajection of ONE link */
 class LinkMotion : public TrajectoryCostTerm
 {
 public:
@@ -175,6 +218,259 @@ public:
 
 	using TrajectoryCostTerm::operator();
 	double operator()(const SubTrajectory& s, std::string& comment) const override;
+};
+
+/** Sum of length of Cartesian trajection of some links */
+class LinkMotionSum : public TrajectoryCostTerm
+{
+public:
+	LinkMotionSum(std::vector<std::string> links, std::vector<Eigen::Isometry3d> offsets);
+
+	std::vector<std::string> link_names;
+	std::vector<Eigen::Isometry3d> offsets;  //< offsets to apply to each link's position
+
+	using TrajectoryCostTerm::operator();
+	double operator()(const SubTrajectory& s, std::string& comment) const override;
+};
+
+class WeightedSumTrajectoryCost : public moveit::task_constructor::TrajectoryCostTerm
+{
+public:
+  using TermW = std::pair<std::shared_ptr<moveit::task_constructor::TrajectoryCostTerm>, double>;
+
+  void add(const std::shared_ptr<moveit::task_constructor::TrajectoryCostTerm>& term, double w = 1.0)
+  { terms_.emplace_back(term, w); }
+
+  double operator()(const moveit::task_constructor::SolutionSequence& seq,
+                    std::string& comment) const override
+  {
+    double total = 0.0;
+    std::ostringstream oss;
+    oss << "WeightedSumTraj(seq): ";
+
+    for (const auto& [term, w] : terms_) {
+      if (!term) continue;
+      std::string cmt;
+      const double c = (*term)(seq, cmt);   // call with seq
+      total += w * c;
+      oss << "{c=" << c << ", w=" << w;
+      if (!cmt.empty()) oss << ", " << cmt;
+      oss << "} ";
+    }
+
+    comment = oss.str();
+    return total;
+  }
+
+  double operator()(const moveit::task_constructor::WrappedSolution& wrap,
+                    std::string& comment) const override
+  {
+    double total = 0.0;
+    std::ostringstream oss;
+    oss << "WeightedSumTraj(wrap): ";
+
+    for (const auto& [term, w] : terms_) {
+      if (!term) continue;
+      std::string cmt;
+      const double c = (*term)(wrap, cmt);  // call with wrap
+      total += w * c;
+      oss << "{c=" << c << ", w=" << w;
+      if (!cmt.empty()) oss << ", " << cmt;
+      oss << "} ";
+    }
+
+    comment = oss.str();
+    return total;
+  }
+
+private:
+  std::vector<TermW> terms_;
+};
+
+/* Manipulability in a specific direction */
+class DirectionalManipulability: public TrajectoryCostTerm
+{
+public:
+  enum class Space { TRANSLATION, ROTATION };
+  DirectionalManipulability(
+      std::map<std::string, std::string> group_ee,
+      geometry_msgs::msg::Vector3Stamped direction_vec,
+      Space space,
+      std::map<std::string,double> group_weights,
+      std::map<std::string, Eigen::Isometry3d> group_tcp_offsets,
+      double epsilon,
+      Mode mode)
+    : group_ee_(std::move(group_ee))
+    , direction_vec_(std::move(direction_vec))
+    , dir_frame_(direction_vec_.header.frame_id)
+    , space_(space)
+    , group_weights_(std::move(group_weights))
+    , default_tcp_offset_ee_(Eigen::Isometry3d::Identity())
+    , group_tcp_offsets_(std::move(group_tcp_offsets))
+    , eps_(epsilon)
+    , mode_(mode)
+  {
+    dir_local_ = Eigen::Vector3d(direction_vec_.vector.x, direction_vec_.vector.y, direction_vec_.vector.z);
+  }
+
+  using TrajectoryCostTerm::operator();
+  double operator()(const SubTrajectory& s, std::string& comment) const override;
+
+private:
+  double evalState(const moveit::core::RobotState& state_in, const Eigen::Vector3d& u_world) const;
+
+  // Helper: fetch per-group offset, fallback to default, else zero
+  Eigen::Vector3d tcpOffsetEE(const std::string& group) const {
+    auto it = group_tcp_offsets_.find(group);
+    if (it != group_tcp_offsets_.end()) return it->second.translation();
+    return default_tcp_offset_ee_.translation();
+  }
+
+  std::map<std::string, std::string> group_ee_;
+  geometry_msgs::msg::Vector3Stamped direction_vec_;
+  std::string dir_frame_;
+  Eigen::Vector3d dir_local_;
+  Space space_;
+  std::map<std::string,double> group_weights_;
+  double eps_;
+  Mode  mode_;
+
+  // NEW: TCP offsets
+  Eigen::Isometry3d default_tcp_offset_ee_;
+  std::map<std::string, Eigen::Isometry3d> group_tcp_offsets_;
+};
+
+
+// ---------- Helpers ----------
+inline double sigmaMinFullJ(const moveit::core::RobotState& rs,
+                            const moveit::core::JointModelGroup* jmg,
+                            const std::string& tip_link)
+{
+  Eigen::MatrixXd J;
+  rs.getJacobian(jmg, rs.getLinkModel(tip_link), Eigen::Vector3d::Zero(), J);  // 6×N
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(J, Eigen::ComputeThinU | Eigen::ComputeThinV);
+  return svd.singularValues().minCoeff();
+}
+
+// Smooth quadratic penalty that turns on below warn
+//  s >= warn         -> 0
+//  crit < s < warn   -> ((warn - s)/warn)^2
+//  s <= crit         -> (hard_gate ? inf : big penalty)
+inline double sigmaPenalty(double s, double warn, double crit, bool hard_gate, double big = 1e6)
+{
+  if (s >= warn) return 0.0;
+  if (s <= crit) return hard_gate ? std::numeric_limits<double>::infinity() : big;
+  const double d = (warn - s) / std::max(1e-12, warn);
+  return d * d;
+}
+
+/* ManipulabilitySoftPenalty */
+class ManipulabilitySoftPenalty : public moveit::task_constructor::CostTerm
+{
+public:
+  // group_ee: map "group_name" -> "ee_link_name" (evaluate worst arm)
+  explicit ManipulabilitySoftPenalty(std::map<std::string, std::string> group_ee,
+                                     double sigma_warn = 3e-3,
+                                     double sigma_crit = 1e-3,
+                                     bool hard_gate = true,
+                                     double weight = 1.0)
+  : group_ee_(std::move(group_ee)),
+    sigma_warn_(sigma_warn), sigma_crit_(sigma_crit),
+    hard_gate_(hard_gate), weight_(weight) {}
+
+  double operator()(const moveit::task_constructor::SubTrajectory& s,
+                    std::string& comment) const override;
+
+  void setThresholds(double warn, double crit) { sigma_warn_ = warn; sigma_crit_ = crit; }
+  void setHardGate(bool on) { hard_gate_ = on; }
+  void setWeight(double w) { weight_ = w; }
+
+private:
+  std::map<std::string, std::string> group_ee_;
+  double sigma_warn_, sigma_crit_;
+  bool hard_gate_;
+  double weight_;
+};
+
+class ManipulabilityVolumeCost : public moveit::task_constructor::CostTerm
+{
+public:
+  ManipulabilityVolumeCost(std::map<std::string,std::string> group_ee,
+                           std::map<std::string,double> group_weights,
+                           bool translation_only,
+                           std::map<std::string, Eigen::Isometry3d> group_tcp_offsets,
+                           double lambda = 1e-4,
+                           double mu = 0.0,
+                           double weight = 1.0)
+  : group_ee_(std::move(group_ee))
+  , group_weights_(std::move(group_weights))
+  , translation_only_(translation_only)
+  , default_tcp_offset_ee_(Eigen::Isometry3d::Identity())
+  , group_tcp_offsets_(std::move(group_tcp_offsets))
+  , lambda_(lambda)
+  , mu_(mu)
+  , weight_(weight) {}
+
+  double operator()(const moveit::task_constructor::SubTrajectory& s,
+                    std::string& comment) const override;
+
+//   // Set/override a single group’s TCP offset later if needed
+//   void setTcpOffsetEE(const std::string& group, const Eigen::Vector3d& offset_ee) {
+//     group_tcp_offsets_[group] = offset_ee;
+//   }
+
+private:
+  static double logManipulability(const Eigen::MatrixXd& Jsub, double lambda) {
+    Eigen::JacobiSVD<Eigen::MatrixXd> svd(Jsub, Eigen::ComputeThinU|Eigen::ComputeThinV);
+    const auto& sv = svd.singularValues();
+    double acc = 0.0;
+    for (int i=0;i<sv.size();++i) acc += std::log(sv[i] + lambda);
+    return acc;
+  }
+
+  double groupWeight(const std::string& g) const {
+    if (group_weights_.empty()) return 1.0;
+    auto it = group_weights_.find(g);
+    return it==group_weights_.end() ? 0.0 : it->second;
+  }
+
+  // Helper: fetch per-group offset, fallback to default, else zero
+  Eigen::Vector3d tcpOffsetEE(const std::string& group) const {
+    auto it = group_tcp_offsets_.find(group);
+    if (it != group_tcp_offsets_.end()) return it->second.translation();
+    return default_tcp_offset_ee_.translation();
+  }
+
+  std::map<std::string,std::string> group_ee_;
+  std::map<std::string,double>      group_weights_;
+  bool translation_only_;
+
+  Eigen::Isometry3d default_tcp_offset_ee_;                       // fallback
+  std::map<std::string, Eigen::Isometry3d> group_tcp_offsets_; // overrides
+
+  double lambda_, mu_, weight_;
+};
+
+
+
+/* WeightedSumCost (combines any cost terms) */
+class WeightedSumCost : public moveit::task_constructor::CostTerm
+{
+public:
+  // Add any number of (cost_term, weight) pairs
+  using TermW = std::pair<std::shared_ptr<moveit::task_constructor::CostTerm>, double>;
+
+  WeightedSumCost() = default;
+  explicit WeightedSumCost(std::initializer_list<TermW> list) : terms_(list) {}
+
+  void add(const std::shared_ptr<moveit::task_constructor::CostTerm>& term, double weight = 1.0)
+  { terms_.emplace_back(term, weight); }
+
+  double operator()(const moveit::task_constructor::SubTrajectory& s,
+                    std::string& comment) const override;
+
+private:
+  std::vector<TermW> terms_;
 };
 
 /** inverse distance to collision

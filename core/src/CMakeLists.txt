@@ -12,6 +12,7 @@ add_library(${PROJECT_NAME} SHARED
 	${PROJECT_INCLUDE}/storage.h
 	${PROJECT_INCLUDE}/task.h
 	${PROJECT_INCLUDE}/task_p.h
+	# ${PROJECT_INCLUDE}/task_routing.h
 	${PROJECT_INCLUDE}/utils.h
 
 	${PROJECT_INCLUDE}/solvers/planner_interface.h
@@ -29,6 +30,7 @@ add_library(${PROJECT_NAME} SHARED
 	stage.cpp
 	storage.cpp
 	task.cpp
+	# task_routing.cpp
 	utils.cpp
 
 	solvers/planner_interface.cpp
@@ -47,6 +49,7 @@ ament_target_dependencies(${PROJECT_NAME}
 	rclcpp
 	rviz_marker_tools
 	visualization_msgs
+	moveit_visual_tools
 )
 target_include_directories(${PROJECT_NAME}
 	PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

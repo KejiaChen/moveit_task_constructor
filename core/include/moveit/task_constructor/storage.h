@@ -81,7 +81,7 @@ class InterfaceState
 	friend class ContainerBasePrivate;  // allow setting priority_ for pruning
 
 public:
-	enum Status : uint8_t
+	enum Status
 	{
 		ENABLED,  // state is actively considered during planning
 		ARMED,  // disabled state in a Connecting interface that will become re-enabled with a new opposite state
@@ -198,12 +198,12 @@ public:
 		const InterfaceState* operator->() const noexcept { return base_type::const_iterator::operator*(); }
 	};
 
-	enum Direction : uint8_t
+	enum Direction
 	{
 		FORWARD,
 		BACKWARD,
 	};
-	enum Update : uint8_t
+	enum Update
 	{
 		STATUS = 1 << 0,
 		PRIORITY = 1 << 1,

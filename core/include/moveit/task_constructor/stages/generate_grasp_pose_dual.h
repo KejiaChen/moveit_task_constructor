@@ -1,7 +1,7 @@
 /*********************************************************************
  * Software License Agreement (BSD License)
  *
- *  Copyright (c) 2018, Hamburg University
+ *  Copyright (c) 2017, Hamburg University
  *  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -31,65 +31,48 @@
  *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  *********************************************************************/
-/* Authors: Michael Goerner */
 
-#include <moveit/task_constructor/stages/predicate_filter.h>
+/* Authors: Michael Goerner
+   Desc:    Generator Stage for simple grasp poses
+*/
 
-#include <moveit/task_constructor/storage.h>
+#pragma once
 
-#include <moveit/planning_scene/planning_scene.h>
-
-#include <moveit/robot_state/conversions.h>
-#include <moveit/robot_state/robot_state.h>
-
-#include <functional>
+#include <moveit/task_constructor/stages/generate_pose.h>
 
 namespace moveit {
 namespace task_constructor {
 namespace stages {
 
-PredicateFilter::PredicateFilter(const std::string& name, Stage::pointer&& child)
-  : WrapperBase(name, std::move(child)) {
-	auto& p = properties();
-	p.declare<Predicate>("predicate", "predicate to filter wrapped solutions");
-	p.declare<bool>("ignore_filter", false, "ignore predicate and forward all solutions");
-}
+using GroupPoseDict = std::map<std::string, geometry_msgs::msg::PoseStamped>;
+using GroupStringDict = std::map<std::string, std::string>;
+using GroupVectorDict = std::map<std::string, std::vector<double>>;
 
-void PredicateFilter::init(const moveit::core::RobotModelConstPtr& robot_model) {
-	InitStageException errors;
+class GenerateGraspPoseDual : public GeneratePose
+{
+public:
+	GenerateGraspPoseDual(const std::string& name = "generate grasp pose for follower", const std::vector<std::string>& group_names = {"panda_1","panda_2"});
 
-	try {
-		WrapperBase::init(robot_model);
-	} catch (InitStageException& e) {
-		errors.append(e);
-	}
+	void init(const core::RobotModelConstPtr& robot_model) override;
+	void compute() override;
 
-	const auto& props = properties();
+    void get_exploration_axis(Eigen::Vector3d& rotation_axis);
 
-	// In theory this could be set in interface states
-	// but we enforce it here to keep code flow sane and maintainable
-	if (props.get("predicate").empty()) {
-		InitStageException e(*this, "predicate is not specified");
-		errors.append(e);
-	}
+	void setEndEffector(const GroupStringDict& eefs) {setProperty("eefs", eefs); }
+	void setObject(const GroupStringDict& objects) { setProperty("objects", objects); }
+	void setTargetPoseInObject(const GroupPoseDict& targets) { setProperty("targets", targets); }
+	void setAngleDelta(double delta) { setProperty("angle_delta", delta); }
 
-	if (errors)
-		throw errors;
-}
+	void setPreGraspPose(const std::map<std::string, std::string>& pregrasps) { setProperty("pregrasps", pregrasps); }
+	void setPreGraspPose(const std::map<std::string, moveit_msgs::msg::RobotState>& pregrasps) { setProperty("pregrasps", pregrasps); }
+	void setGraspPose(const std::string& grasp) { setProperty("grasp", grasp); }
+	void setGraspPose(const moveit_msgs::msg::RobotState& grasp) { setProperty("grasp", grasp); }
 
-void PredicateFilter::onNewSolution(const SolutionBase& s) {
-	const auto& props = properties();
-
-	// false-positive in clang-tidy 10.0.0: predicate might change comment
-	// NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
-	std::string comment = s.comment();
-
-	double cost = s.cost();
-	if (!props.get<bool>("ignore_filter") && !props.get<Predicate>("predicate")(s, comment))
-		cost = std::numeric_limits<double>::infinity();
-
-	liftSolution(s, cost, comment);
-}
+protected:
+	void onNewSolution(const SolutionBase& s) override;
+	std::vector<std::string> group_names_;
+	std::string whole_body_group_;
+};
 }  // namespace stages
 }  // namespace task_constructor
 }  // namespace moveit

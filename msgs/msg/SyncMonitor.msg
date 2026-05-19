@@ -1,0 +1,4 @@
+# SyncMonitor.msg
+std_msgs/Float64 ee_position_distance
+std_msgs/Float64 ee_position_angular
+std_msgs/Float64 ee_rotation_angular

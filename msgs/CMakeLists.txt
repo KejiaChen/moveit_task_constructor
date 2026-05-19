@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.5)
 project(moveit_task_constructor_msgs)
 
 find_package(ament_cmake REQUIRED)
@@ -16,13 +16,17 @@ set(msg_files
 	msg/StageStatistics.msg
 	msg/SubSolution.msg
 	msg/SubTrajectory.msg
+	msg/SyncMonitor.msg
 	msg/TaskDescription.msg
 	msg/TaskStatistics.msg
 	msg/TrajectoryExecutionInfo.msg
+	msg/ClipNames.msg
+	msg/TrajectorySync.msg
 )
 
 set(srv_files
 	srv/GetSolution.srv
+	srv/GetClipNames.srv
 )
 
 set(action_files

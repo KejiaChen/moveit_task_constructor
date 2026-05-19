@@ -8,15 +8,19 @@ add_library(${PROJECT_NAME}_stages SHARED
 	${PROJECT_INCLUDE}/stages/generate_pose.h
 	${PROJECT_INCLUDE}/stages/generate_random_pose.h
 	${PROJECT_INCLUDE}/stages/generate_grasp_pose.h
+	${PROJECT_INCLUDE}/stages/generate_grasp_pose_dual.h
 	${PROJECT_INCLUDE}/stages/generate_place_pose.h
 	${PROJECT_INCLUDE}/stages/compute_ik.h
+	${PROJECT_INCLUDE}/stages/compute_ik_multiple.h
 	${PROJECT_INCLUDE}/stages/passthrough.h
 	${PROJECT_INCLUDE}/stages/noop.h
 	${PROJECT_INCLUDE}/stages/predicate_filter.h
 
 	${PROJECT_INCLUDE}/stages/connect.h
+	${PROJECT_INCLUDE}/stages/connect_master_follower_reverse.h
 	${PROJECT_INCLUDE}/stages/move_to.h
 	${PROJECT_INCLUDE}/stages/move_relative.h
+	${PROJECT_INCLUDE}/stages/move_relative_multiple.h
 
 	${PROJECT_INCLUDE}/stages/simple_grasp.h
 	${PROJECT_INCLUDE}/stages/pick.h
@@ -30,14 +34,18 @@ add_library(${PROJECT_NAME}_stages SHARED
 	generate_pose.cpp
 	generate_random_pose.cpp
 	generate_grasp_pose.cpp
+	generate_grasp_pose_dual.cpp
 	generate_place_pose.cpp
 	compute_ik.cpp
+	compute_ik_multiple.cpp
 	passthrough.cpp
 	predicate_filter.cpp
 
 	connect.cpp
+	connect_master_follower_reverse.cpp
 	move_to.cpp
 	move_relative.cpp
+	move_relative_multiple.cpp
 
 	simple_grasp.cpp
 	pick.cpp
@@ -52,6 +60,7 @@ ament_target_dependencies(${PROJECT_NAME}_stages
 	rclcpp
 	tf2_eigen
 	visualization_msgs
+	moveit_visual_tools
 )
 
 add_library(${PROJECT_NAME}_stage_plugins SHARED

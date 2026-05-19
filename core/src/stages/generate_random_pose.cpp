@@ -47,7 +47,6 @@
 #include <tf2_eigen/tf2_eigen.h>
 #endif
 
-#include <fmt/format.h>
 #include <chrono>
 
 static auto LOGGER = rclcpp::get_logger("GenerateRandomPose");
@@ -101,12 +100,7 @@ void GenerateRandomPose::compute() {
 	if (seed_pose.header.frame_id.empty())
 		seed_pose.header.frame_id = scene->getPlanningFrame();
 	else if (!scene->knowsFrameTransform(seed_pose.header.frame_id)) {
-		if (storeFailures()) {
-			SubTrajectory trajectory;
-			trajectory.markAsFailure(fmt::format("Unknown frame: '{}'", seed_pose.header.frame_id));
-			spawn(InterfaceState(scene), std::move(trajectory));
-		} else
-			RCLCPP_WARN(LOGGER, "Unknown frame: '%s'", seed_pose.header.frame_id.c_str());
+		RCLCPP_WARN(LOGGER, "Unknown frame: '%s'", seed_pose.header.frame_id.c_str());
 		return;
 	}
 

@@ -40,7 +40,6 @@
 #include <moveit/task_constructor/marker_tools.h>
 #include <moveit/planning_scene/planning_scene.h>
 #include <rviz_marker_tools/marker_creation.h>
-#include <fmt/format.h>
 
 namespace moveit {
 namespace task_constructor {
@@ -80,12 +79,7 @@ void GeneratePose::compute() {
 	if (target_pose.header.frame_id.empty())
 		target_pose.header.frame_id = scene->getPlanningFrame();
 	else if (!scene->knowsFrameTransform(target_pose.header.frame_id)) {
-		if (storeFailures()) {
-			SubTrajectory trajectory;
-			trajectory.markAsFailure(fmt::format("Unknown frame: '{}'", target_pose.header.frame_id));
-			spawn(InterfaceState(scene), std::move(trajectory));
-		} else
-			RCLCPP_WARN(LOGGER, "Unknown frame: '%s'", target_pose.header.frame_id.c_str());
+		RCLCPP_WARN(LOGGER, "Unknown frame: '%s'", target_pose.header.frame_id.c_str());
 		return;
 	}
 

@@ -15,7 +15,7 @@
 
 using namespace moveit::task_constructor;
 
-enum StageType : uint8_t
+enum StageType
 {
 	GEN,
 	FW,
@@ -625,7 +625,7 @@ TEST(Task, reuse) {
 		configure(t);
 		EXPECT_TRUE(t.plan(1));
 	} catch (const InitStageException& e) {
-		ADD_FAILURE() << "InitStageException:\n" << e << t;
+		ADD_FAILURE() << "InitStageException:" << std::endl << e << t;
 	}
 }
 

@@ -120,6 +120,20 @@ public:
 		    STATISTICS_TOPIC, rclcpp::QoS(1).transient_local());
 		solution_publisher_ = node_->create_publisher<moveit_task_constructor_msgs::msg::Solution>(
 		    SOLUTION_TOPIC, rclcpp::QoS(1).transient_local());
+		trajectory_publisher_ = node_->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+		    "/mtc_joint_trajectory", rclcpp::QoS(1).transient_local());
+		subtrajectory_publisher_ = node_->create_publisher<moveit_task_constructor_msgs::msg::SubTrajectory>(
+		    "/mtc_sub_trajectory", rclcpp::QoS(1).transient_local());
+
+		// auto status_subscription = node->create_subscription<trajectory_status::msg::TrajectoryStatus>(
+        // "trajectory_status", 10,
+        // [](const trajectory_status::msg::TrajectoryStatus::SharedPtr msg) {
+        //     if (msg->robot_name == "lead") {
+        //         lead_done.store(msg->is_done);
+        //     } else if (msg->robot_name == "follow") {
+        //         follow_done.store(msg->is_done);
+        //     }
+        // });
 
 		get_solution_service_ = node_->create_service<moveit_task_constructor_msgs::srv::GetSolution>(
 		    std::string(GET_SOLUTION_SERVICE "_") + task_id_,
@@ -155,6 +169,10 @@ public:
 	rclcpp::Publisher<moveit_task_constructor_msgs::msg::TaskStatistics>::SharedPtr task_statistics_publisher_;
 	/// publish new solutions
 	rclcpp::Publisher<moveit_task_constructor_msgs::msg::Solution>::SharedPtr solution_publisher_;
+	// publish trajectories
+	rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_publisher_;
+	// publish mtc sub_trajectory
+	rclcpp::Publisher<moveit_task_constructor_msgs::msg::SubTrajectory>::SharedPtr subtrajectory_publisher_;
 	/// services to provide an individual Solution
 	rclcpp::Service<moveit_task_constructor_msgs::srv::GetSolution>::SharedPtr get_solution_service_;
 	rclcpp::Node::SharedPtr node_;
@@ -195,9 +213,27 @@ void Introspection::fillSolution(moveit_task_constructor_msgs::msg::Solution& ms
 	msg.task_id = impl->task_id_;
 }
 
-void Introspection::publishSolution(const SolutionBase& s) {
+void Introspection::publishSolution(const SolutionBase& s, bool publish_for_servo) {
 	moveit_task_constructor_msgs::msg::Solution msg;
 	fillSolution(msg, s);
+
+	// publish trajectories for servo
+	if (publish_for_servo){
+		for (const moveit_task_constructor_msgs::msg::SubTrajectory& sub_trajectory : msg.sub_trajectory) {
+			if (sub_trajectory.trajectory.joint_trajectory.points.empty())
+				continue;
+			// publish trajectories
+			// impl->trajectory_publisher_->publish(sub_trajectory.trajectory.joint_trajectory);
+			impl->subtrajectory_publisher_->publish(sub_trajectory);
+			RCLCPP_INFO_STREAM(LOGGER, "Published trajectory id " << sub_trajectory.info.id 
+																<< " for stage " << sub_trajectory.info.stage_id
+																<< " with "<< sub_trajectory.trajectory.joint_trajectory.points.size()
+																<< " waypoints");
+			rclcpp::sleep_for(std::chrono::milliseconds(100));
+		}
+		return;
+	}
+
 	impl->solution_publisher_->publish(msg);
 }
 
@@ -206,7 +242,7 @@ void Introspection::publishAllSolutions(bool wait) {
 		publishSolution(*solution);
 
 		if (wait) {
-			std::cout << "Press <Enter> to continue ...\n";
+			std::cout << "Press <Enter> to continue ..." << std::endl;
 			int ch = getchar();
 			if (ch == 'q' || ch == 'Q')
 				break;

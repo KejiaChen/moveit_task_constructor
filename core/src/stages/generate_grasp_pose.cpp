@@ -59,6 +59,7 @@ GenerateGraspPose::GenerateGraspPose(const std::string& name) : GeneratePose(nam
 	auto& p = properties();
 	p.declare<std::string>("eef", "name of end-effector");
 	p.declare<std::string>("object");
+	// p.declare<std::vector<double>>("target_delta", "relative position of target pose in object frame");
 	p.declare<double>("angle_delta", 0.1, "angular steps (rad)");
 	p.declare<Eigen::Vector3d>("rotation_axis", Eigen::Vector3d::UnitZ(), "rotate object pose about given axis");
 
@@ -156,6 +157,7 @@ void GenerateGraspPose::compute() {
 	// set end effector pose
 	const auto& props = properties();
 	const std::string& eef = props.get<std::string>("eef");
+	// const std::vector<double>& target_delta = props.get<std::vector<double>>("target_delta");
 	const moveit::core::JointModelGroup* jmg = scene->getRobotModel()->getEndEffector(eef);
 
 	moveit::core::RobotState& robot_state = scene->getCurrentStateNonConst();

@@ -90,7 +90,7 @@ public:
 	void registerSolution(const SolutionBase& s);
 
 	/// publish the given solution
-	void publishSolution(const SolutionBase& s);
+	void publishSolution(const SolutionBase& s, bool publish_for_servo=false);
 
 	/// publish all top-level solutions of task
 	void publishAllSolutions(bool wait = true);
@@ -105,9 +105,11 @@ public:
 	/// retrieve or set id of given solution
 	uint32_t solutionId(const moveit::task_constructor::SolutionBase& s);
 
+	void fillSolution(moveit_task_constructor_msgs::msg::Solution& msg, const SolutionBase& s);
+
 private:
 	void fillStageStatistics(const Stage& stage, moveit_task_constructor_msgs::msg::StageStatistics& s);
-	void fillSolution(moveit_task_constructor_msgs::msg::Solution& msg, const SolutionBase& s);
+	
 	/// retrieve or set id of given stage
 	uint32_t stageId(const moveit::task_constructor::Stage* const s);
 	/// retrieve solution with given id

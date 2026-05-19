@@ -72,7 +72,7 @@ MOVEIT_CLASS_FORWARD(RobotTrajectory);
 namespace moveit {
 namespace task_constructor {
 
-enum InterfaceFlag : uint8_t
+enum InterfaceFlag
 {
 	READS_START = 0x01,
 	READS_END = 0x02,
@@ -155,7 +155,7 @@ public:
 	 *
 	 * INTERFACE takes precedence over PARENT.
 	 */
-	enum PropertyInitializerSource : uint8_t
+	enum PropertyInitializerSource
 	{  // TODO: move to property.cpp
 		DEFAULT = 0,
 		MANUAL = 1,
@@ -242,7 +242,7 @@ public:
 	/// Should we generate failure solutions? Note: Always report a failure!
 	bool storeFailures() const;
 
-	virtual bool explainFailure(std::ostream& /*os*/) const { return false; };
+	virtual void explainFailure(std::ostream& os) const;
 
 	/// Get the stage's property map
 	PropertyMap& properties();
@@ -283,7 +283,7 @@ class PropagatingEitherWayPrivate;
 /** Base class for stages that can propagate InterfaceStates
  *
  *  They read an InterfaceState on one side (start or end) and
- *  push a new InterfaceState to the opposite side.
+ *  push a new InterfaceState to the opposite site.
  *  By default, the class auto-derives its actual propagation direction from the context.
  *  In order to enforce forward, backward, or bothway propagation, one can use restrictDirection().
  */
@@ -293,7 +293,7 @@ public:
 	PRIVATE_CLASS(PropagatingEitherWay)
 	PropagatingEitherWay(const std::string& name = "propagating either way");
 
-	enum Direction : uint8_t
+	enum Direction
 	{
 		AUTO = 0x00,  // auto-derive direction from context
 		FORWARD = 0x01,  // propagate forward only

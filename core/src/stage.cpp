@@ -91,9 +91,9 @@ const char* InitStageException::what() const noexcept {
 }
 
 std::ostream& operator<<(std::ostream& os, const InitStageException& e) {
-	os << "Error initializing stage" << (e.errors_.size() > 1 ? "s" : "") << ":\n ";
+	os << "Error initializing stage" << (e.errors_.size() > 1 ? "s" : "") << ":" << std::endl;
 	for (const auto& pair : e.errors_)
-		os << pair.first->name() << ": " << pair.second << '\n';
+		os << pair.first->name() << ": " << pair.second << std::endl;
 	return os;
 }
 
@@ -164,6 +164,7 @@ bool StagePrivate::storeSolution(const SolutionBasePtr& solution, const Interfac
 		introspection_->registerSolution(*solution);
 
 	if (solution->isFailure()) {
+		// RCLCPP_INFO_STREAM(LOGGER, fmt::format("Stage {}: solution is a failure", name()));
 		++num_failures_;
 		if (parent())
 			parent()->pimpl()->onNewFailure(*me(), from, to);
@@ -171,6 +172,7 @@ bool StagePrivate::storeSolution(const SolutionBasePtr& solution, const Interfac
 			return false;  // drop solution
 		failures_.push_back(solution);
 	} else {
+		// RCLCPP_INFO_STREAM(LOGGER, fmt::format("Stage {}: solution is valid to be stored", name()));
 		solutions_.insert(solution);
 	}
 	return true;
@@ -249,12 +251,16 @@ void StagePrivate::connect(const InterfaceState& from, const InterfaceState& to,
 	computeCost(from, to, *solution);
 
 	if (!storeSolution(solution, &from, &to))
+	{
+		RCLCPP_INFO_STREAM(LOGGER, fmt::format("Stage {}: storing solution fails", name()));
 		return;  // solution dropped
-
+	}
+		
 	solution->setStartState(from);
 	solution->setEndState(to);
 
 	newSolution(solution);
+	RCLCPP_INFO_STREAM(LOGGER, fmt::format("Stage {}: spwning new solution", name()));
 }
 
 void StagePrivate::newSolution(const SolutionBasePtr& solution) {
@@ -435,6 +441,11 @@ void Stage::silentFailure() {
 
 bool Stage::storeFailures() const {
 	return pimpl()->storeFailures();
+}
+
+void Stage::explainFailure(std::ostream& os) const {
+	if (!failures().empty())
+		os << ": " << failures().front()->comment();
 }
 
 PropertyMap& Stage::properties() {
@@ -836,10 +847,10 @@ void ConnectingPrivate::newState(Interface::iterator it, Interface::UpdateFlags 
 			os << (updated ? " !" : " +");
 		else
 			os << "  ";
-		os << d << " " << this->pullInterface(d) << ": " << *this->pullInterface(d) << '\n';
+		os << d << " " << this->pullInterface(d) << ": " << *this->pullInterface(d) << std::endl;
 	}
 	os << std::setw(15) << " ";
-	os << pendingPairsPrinter() << '\n';
+	os << pendingPairsPrinter() << std::endl;
 #endif
 }
 

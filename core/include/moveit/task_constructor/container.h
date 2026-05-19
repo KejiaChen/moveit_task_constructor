@@ -80,7 +80,7 @@ public:
 
 	virtual bool canCompute() const = 0;
 	virtual void compute() = 0;
-	bool explainFailure(std::ostream& os) const override;
+	void explainFailure(std::ostream& os) const override;
 
 	/// called by a (direct) child when a new solution becomes available
 	virtual void onNewSolution(const SolutionBase& s) = 0;
